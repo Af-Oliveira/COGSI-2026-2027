@@ -15,6 +15,20 @@ repositories {
 dependencies {
     implementation      libs.log4j.api
     implementation      libs.log4j.core
+
+    // JUnit 5 is required to compile and run the unit tests in src/test/java.
+    testImplementation  libs.junit.jupiter
+    // Gradle 9 requires the JUnit Platform launcher to be present on the test runtime classpath.
+    testRuntimeOnly     libs.junit.platform.launcher
+}
+
+// Configure the built-in test task to discover and run JUnit 5 (Jupiter) tests.
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        showStandardStreams = true
+    }
 }
 
 // Set the version of the application, using a property from gradle.properties or defaulting to 'unspecified'.
@@ -108,4 +122,48 @@ tasks.register('runClient', JavaExec) {
     doFirst {
         println "Starting ChatClientApp with server IP: ${serverIP.get()} and port: ${serverPort.get()}"
     }
+}
+
+// Custom task to run the chat server application (the peer of runClient).
+// The listening port can be configured through the 'serverPort' Gradle property.
+tasks.register('runServer', JavaExec) {
+    group = 'DevOps'
+    description = 'Launches the chat server on a configurable port'
+
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass.set('org.example.ChatServerApp')
+
+    def serverPort = providers.gradleProperty('serverPort').orElse('59001')
+    args(serverPort.get())
+
+    doFirst {
+        println "Starting ChatServerApp on port ${serverPort.get()}"
+    }
+}
+
+// Custom task to back up the application source directories.
+// It copies ONLY the source trees (src/main and src/test) into a backup folder.
+tasks.register('backupSources', Copy) {
+    group = 'build'
+    description = 'Copies the application source directories into a backup folder'
+
+    from('src') {
+        include 'main/**'
+        include 'test/**'
+    }
+    into(layout.buildDirectory.dir('backup/sources'))
+}
+
+// Custom task to archive the source backup into a zip file.
+// It depends on backupSources, so the backup is always produced before archiving.
+tasks.register('backupZip', Zip) {
+    group = 'build'
+    description = 'Archives the source backup produced by backupSources into a zip file'
+
+    dependsOn(tasks.named('backupSources'))
+
+    from(layout.buildDirectory.dir('backup/sources'))
+    archiveBaseName = 'chat-server-sources'
+    archiveVersion = project.version.toString()
+    destinationDirectory = layout.buildDirectory.dir('distributions')
 }
