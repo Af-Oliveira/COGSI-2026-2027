@@ -1,0 +1,211 @@
+/*
+ * Build configuration for the Bookstore Spring Boot application.
+ *
+ * The project was bootstrapped with the Gradle 'init' task and then adapted:
+ * the generated sample sources were replaced with the Bookstore application,
+ * the layout was flattened to a single module and the Maven build (pom.xml)
+ * was translated into this Gradle build, using the version catalog in
+ * gradle/libs.versions.toml for dependency and plugin management.
+ */
+
+// Ant filter used by the deployment task to replace tokens in configuration files.
+import org.apache.tools.ant.filters.ReplaceTokens
+
+plugins {
+    // Core Java support and the 'application' plugin (installDist / distZip / run).
+    id 'java'
+    id 'application'
+
+    // Spring Boot, resolved from the version catalog.
+    alias(libs.plugins.spring.boot)
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+// Use a Java toolchain so the build is reproducible across machines.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Import the Spring Boot BOM so that managed dependencies do not need explicit versions.
+    implementation platform(libs.spring.boot.dependencies)
+    testImplementation platform(libs.spring.boot.dependencies)
+
+    implementation libs.spring.boot.starter.web
+    implementation libs.spring.boot.starter.data.jpa
+    implementation libs.spring.boot.starter.hateoas
+    implementation libs.spring.boot.starter.actuator
+
+    runtimeOnly libs.h2
+
+    testImplementation libs.spring.boot.starter.test
+    // Gradle 9 requires the JUnit Platform launcher on the test runtime classpath.
+    // integrationTestRuntimeOnly extends testRuntimeOnly, so this also covers integration tests.
+    testRuntimeOnly libs.junit.platform.launcher
+}
+
+application {
+    // Main class used by bootRun, run and the generated distribution scripts.
+    mainClass = 'com.example.bookstore.BookstoreApplication'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Integration test source set
+ * ---------------------------------------------------------------------------
+ * A dedicated source set keeps slow, context-heavy tests out of the default
+ * unit test task while still wiring them into 'check'.
+ */
+sourceSets {
+    integrationTest {
+        java.srcDir file('src/integrationTest/java')
+        resources.srcDir file('src/integrationTest/resources')
+        compileClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.register('integrationTest', Test) {
+    group = 'verification'
+    description = 'Runs the integration tests.'
+
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    classpath = sourceSets.integrationTest.runtimeClasspath
+
+    useJUnitPlatform()
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Deployment tasks
+ * ---------------------------------------------------------------------------
+ */
+
+// Directory that holds the assembled development deployment.
+def deploymentDir = layout.buildDirectory.dir('deployment/dev')
+
+// 1. Delete task that cleans the development deployment directory.
+tasks.register('cleanDeployment', Delete) {
+    group = 'deployment'
+    description = 'Deletes the development deployment directory'
+
+    delete deploymentDir
+}
+
+// 2. Copy task that places the executable application artifact in the deployment directory.
+tasks.register('copyAppArtifact', Copy) {
+    group = 'deployment'
+    description = 'Copies the executable application artifact into the deployment directory'
+
+    dependsOn tasks.named('bootJar')
+    from(tasks.named('bootJar').flatMap { it.archiveFile })
+    into deploymentDir
+}
+
+// 3. Copy task that places the runtime dependency JARs in the deployment lib directory.
+tasks.register('copyRuntimeDependencies', Copy) {
+    group = 'deployment'
+    description = 'Copies the runtime dependency JARs into the deployment lib directory'
+
+    from(configurations.runtimeClasspath) {
+        include '*.jar'
+    }
+    into deploymentDir.map { it.dir('lib') }
+}
+
+// 4. Copy task that copies the configuration files, replacing tokens with build metadata.
+tasks.register('copyConfigurationWithTokens', Copy) {
+    group = 'deployment'
+    description = 'Copies configuration files replacing @BUILD_TIMESTAMP@ and @APP_VERSION@'
+
+    def buildTimestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+
+    from('src/main/resources') {
+        include '*.properties'
+        filter(ReplaceTokens, tokens: [
+                BUILD_TIMESTAMP: buildTimestamp,
+                APP_VERSION    : project.version.toString()
+        ])
+    }
+    into deploymentDir
+}
+
+// Top-level task that orchestrates the four deployment steps.
+tasks.register('deployToDev') {
+    group = 'deployment'
+    description = 'Orchestrates a complete development deployment'
+
+    dependsOn tasks.named('cleanDeployment'),
+            tasks.named('copyAppArtifact'),
+            tasks.named('copyRuntimeDependencies'),
+            tasks.named('copyConfigurationWithTokens')
+}
+
+// Guarantee the deployment directory is cleaned before anything is copied into it.
+tasks.named('copyAppArtifact').configure { mustRunAfter tasks.named('cleanDeployment') }
+tasks.named('copyRuntimeDependencies').configure { mustRunAfter tasks.named('cleanDeployment') }
+tasks.named('copyConfigurationWithTokens').configure { mustRunAfter tasks.named('cleanDeployment') }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Run the installed distribution and package the Javadoc
+ * ---------------------------------------------------------------------------
+ */
+
+// Runs the application using the scripts generated by the installDist task.
+tasks.register('runFromDistribution', Exec) {
+    group = 'deployment'
+    description = 'Runs the application using the scripts generated by installDist'
+
+    dependsOn tasks.named('installDist')
+
+    def isWindows = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')
+    def installDir = layout.buildDirectory.dir("install/${project.name}").get().asFile
+    def scriptName = isWindows ? "${project.name}.bat" : project.name
+    def executable = new File(installDir, "bin/${scriptName}")
+
+    // Allow the HTTP port to be overridden from the command line (-PserverPort=...).
+    def serverPort = providers.gradleProperty('serverPort').orElse('8080')
+    environment 'SERVER_PORT', serverPort.get()
+
+    doFirst {
+        println "Running distribution script: ${executable}"
+    }
+
+    commandLine executable.absolutePath
+}
+
+// Generates the Javadoc and packages it into a zip file.
+tasks.register('javadocZip', Zip) {
+    group = 'documentation'
+    description = 'Packages the generated Javadoc into a zip file'
+
+    dependsOn tasks.named('javadoc')
+    from(tasks.named('javadoc'))
+
+    archiveBaseName = 'bookstore-javadoc'
+    archiveVersion = project.version.toString()
+    destinationDirectory = layout.buildDirectory.dir('distributions')
+}
