@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CA1 Alternative solution: the Bookstore application automated with Maven.
+
+  This build reproduces the Gradle-specific automation of CA1 Part 2 using the
+  Maven lifecycle and plugin model:
+    - build / run            -> mvn package, mvn spring-boot:run
+    - deployToDev            -> mvn -Pdeploy-dev package
+    - runFromDistribution    -> mvn -Pdeploy-dev,run-dist exec:exec@runFromDistribution
+    - javadocZip             -> mvn -Pjavadoc-zip package
+    - integration tests      -> mvn verify (maven-failsafe-plugin, *IT.java)
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>bookstore</artifactId>
+    <version>1.0.0</version>
+    <name>bookstore</name>
+    <description>Bookstore Spring Boot application built with Maven (CA1 alternative solution)</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <!-- Development deployment directory used by the deploy-dev profile. -->
+        <deployment.dir>${project.build.directory}/deployment/dev</deployment.dir>
+        <!-- HTTP port used by the run-dist profile (override with -Dserver.port=...). -->
+        <server.port>8080</server.port>
+        <!-- Directory where the Javadoc is generated and then zipped. -->
+        <javadoc.dir>${project.build.directory}/reports/apidocs</javadoc.dir>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-hateoas</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Produces the executable Spring Boot jar and provides spring-boot:run. -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!-- Runs the integration tests (*IT.java) during the verify phase. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!--
+          deploy-dev reproduces the Gradle deployToDev task:
+            1. delete the deployment directory,
+            2. copy the executable application artifact,
+            3. copy the runtime dependency JARs into ./lib,
+            4. copy the configuration files replacing @BUILD_TIMESTAMP@ and @APP_VERSION@,
+            5. generate a distribution script and zip the whole deployment.
+        -->
+        <profile>
+            <id>deploy-dev</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-dependency-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>copy-runtime-dependencies</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>copy-dependencies</goal>
+                                </goals>
+                                <configuration>
+                                    <includeScope>runtime</includeScope>
+                                    <outputDirectory>${project.build.directory}/dependency</outputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>deploy-to-dev</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target>
+                                        <delete dir="${deployment.dir}"/>
+                                        <mkdir dir="${deployment.dir}"/>
+                                        <copy file="${project.build.directory}/${project.build.finalName}.jar"
+                                              todir="${deployment.dir}"/>
+                                        <mkdir dir="${deployment.dir}/lib"/>
+                                        <copy todir="${deployment.dir}/lib">
+                                            <fileset dir="${project.build.directory}/dependency" includes="*.jar"/>
+                                        </copy>
+                                        <copy todir="${deployment.dir}" filtering="true" overwrite="true">
+                                            <fileset dir="src/main/resources" includes="*.properties"/>
+                                            <filterset>
+                                                <filter token="BUILD_TIMESTAMP" value="${maven.build.timestamp}"/>
+                                                <filter token="APP_VERSION" value="${project.version}"/>
+                                            </filterset>
+                                        </copy>
+                                        <copy todir="${deployment.dir}/bin">
+                                            <fileset dir="scripts"/>
+                                        </copy>
+                                        <chmod perm="755">
+                                            <fileset dir="${deployment.dir}/bin" includes="run.sh"/>
+                                        </chmod>
+                                        <zip destfile="${project.build.directory}/bookstore-dev-distribution.zip"
+                                             basedir="${deployment.dir}"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Generates the Javadoc and packages it into a zip file (Gradle javadocZip). -->
+        <profile>
+            <id>javadoc-zip</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>generate-javadoc</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>javadoc</goal>
+                                </goals>
+                                <configuration>
+                                    <reportOutputDirectory>${javadoc.dir}</reportOutputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>zip-javadoc</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target>
+                                        <zip destfile="${project.build.directory}/bookstore-javadoc.zip"
+                                             basedir="${javadoc.dir}"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Runs the generated distribution script (Gradle runFromDistribution). -->
+        <profile>
+            <id>run-dist</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.5.0</version>
+                        <executions>
+                            <execution>
+                                <id>runFromDistribution</id>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${distribution.script}</executable>
+                                    <arguments>
+                                        <argument>--server.port=${server.port}</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Operating-system profiles that select the distribution script. -->
+        <profile>
+            <id>distribution-unix</id>
+            <activation>
+                <os><family>unix</family></os>
+            </activation>
+            <properties>
+                <distribution.script>${deployment.dir}/bin/run.sh</distribution.script>
+            </properties>
+        </profile>
+        <profile>
+            <id>distribution-windows</id>
+            <activation>
+                <os><family>windows</family></os>
+            </activation>
+            <properties>
+                <distribution.script>${deployment.dir}/bin/run.bat</distribution.script>
+            </properties>
+        </profile>
+    </profiles>
+</project>
