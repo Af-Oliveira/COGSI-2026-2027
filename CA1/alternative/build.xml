@@ -9,7 +9,11 @@
     Gradle task          Ant target
     ============         =====================
     build                build
+    bootRun              run
     integrationTest      integration-test
+    deployToDev          deploy-to-dev
+    runFromDistribution  run-from-distribution
+    javadocZip           javadoc-zip
 -->
 <project name="bookstore" default="build" basedir="." xmlns:ivy="antlib:org.apache.ivy.ant">
 
@@ -29,8 +33,12 @@
     <property name="classes.dir" value="${build.dir}/classes"/>
     <property name="test.classes.dir" value="${build.dir}/test-classes"/>
     <property name="libs.dir" value="${build.dir}/libs"/>
+    <property name="dependency.dir" value="${build.dir}/dependency"/>
     <property name="reports.dir" value="${build.dir}/reports"/>
+    <property name="javadoc.dir" value="${reports.dir}/apidocs"/>
     <property name="test.results.dir" value="${reports.dir}/tests"/>
+    <property name="deployment.dir" value="${build.dir}/deployment/dev"/>
+    <property name="distributions.dir" value="${build.dir}/distributions"/>
 
     <property name="jar.file" value="${libs.dir}/${app.name}-${app.version}.jar"/>
     <property name="server.port" value="8080"/>
@@ -118,5 +126,99 @@
     </target>
 
     <target name="build" depends="jar, integration-test" description="Compiles, tests and packages the application"/>
+
+    <!-- ==================================================================== -->
+    <!-- Run                                                                -->
+    <!-- ==================================================================== -->
+    <target name="run" depends="compile" description="Runs the application from the compiled classes">
+        <java classname="${app.main.class}" fork="true" failonerror="true">
+            <classpath>
+                <path refid="runtime.classpath"/>
+                <pathelement location="${classes.dir}"/>
+                <pathelement location="${resources.dir}"/>
+            </classpath>
+            <arg value="--server.port=${server.port}"/>
+        </java>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Deployment                                                         -->
+    <!-- ==================================================================== -->
+    <target name="deploy-to-dev" depends="jar" description="Assembles the development deployment, replacing configuration tokens">
+        <tstamp>
+            <format property="build.timestamp" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+
+        <!-- 1. Clean the deployment directory. -->
+        <delete dir="${deployment.dir}"/>
+        <mkdir dir="${deployment.dir}"/>
+
+        <!-- 2. Copy the main application artifact. -->
+        <copy file="${jar.file}" todir="${deployment.dir}"/>
+
+        <!-- 3. Retrieve and copy the runtime dependency JARs into lib. -->
+        <ivy:retrieve conf="runtime"
+                      pattern="${dependency.dir}/[artifact]-[revision](-[classifier]).[ext]"/>
+        <mkdir dir="${deployment.dir}/lib"/>
+        <copy todir="${deployment.dir}/lib">
+            <fileset dir="${dependency.dir}" includes="*.jar"/>
+        </copy>
+
+        <!-- 4. Copy the configuration replacing the build metadata tokens. -->
+        <copy todir="${deployment.dir}" overwrite="true" filtering="true">
+            <fileset dir="${resources.dir}" includes="*.properties"/>
+            <filterset>
+                <filter token="BUILD_TIMESTAMP" value="${build.timestamp}"/>
+                <filter token="APP_VERSION" value="${app.version}"/>
+            </filterset>
+        </copy>
+
+        <!-- Start scripts and deployment archive. -->
+        <copy todir="${deployment.dir}/bin">
+            <fileset dir="scripts"/>
+        </copy>
+        <chmod file="${deployment.dir}/bin/run.sh" perm="755"/>
+        <mkdir dir="${distributions.dir}"/>
+        <zip destfile="${distributions.dir}/${app.name}-dev-distribution.zip" basedir="${deployment.dir}"/>
+    </target>
+
+    <target name="run-from-distribution" depends="deploy-to-dev" description="Runs the application with the generated start script">
+        <condition property="distribution.script"
+                   value="${deployment.dir}/bin/run.bat"
+                   else="${deployment.dir}/bin/run.sh">
+            <os family="windows"/>
+        </condition>
+        <exec executable="${distribution.script}" failonerror="true">
+            <env key="SERVER_PORT" value="${server.port}"/>
+        </exec>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Documentation                                                      -->
+    <!-- ==================================================================== -->
+    <target name="javadoc" depends="compile" description="Generates the Javadoc">
+        <mkdir dir="${javadoc.dir}"/>
+        <javadoc destdir="${javadoc.dir}"
+                 sourcepath="${src.dir}"
+                 classpathref="compile.classpath"
+                 encoding="UTF-8"
+                 docencoding="UTF-8"
+                 charset="UTF-8"
+                 author="true"
+                 version="true"
+                 use="true"
+                 windowtitle="${app.name} ${app.version} API"
+                 additionalparam="-Xdoclint:none"
+                 failonerror="true">
+            <packageset dir="${src.dir}">
+                <include name="**/*.java"/>
+            </packageset>
+        </javadoc>
+    </target>
+
+    <target name="javadoc-zip" depends="javadoc" description="Packages the generated Javadoc into a zip file">
+        <mkdir dir="${distributions.dir}"/>
+        <zip destfile="${distributions.dir}/${app.name}-javadoc-${app.version}.zip" basedir="${javadoc.dir}"/>
+    </target>
 
 </project>
