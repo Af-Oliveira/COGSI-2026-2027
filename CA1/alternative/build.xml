@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CA1 alternative solution: build file for the Bookstore Spring Boot
+  application, implemented with Apache Ant and Apache Ivy.
+
+  The targets reproduce the Gradle tasks of CA1 Part 2 with the Ant
+  programming model (imperative targets and tasks, explicit depends):
+
+    Gradle task          Ant target
+    ============         =====================
+    build                build
+    integrationTest      integration-test
+-->
+<project name="bookstore" default="build" basedir="." xmlns:ivy="antlib:org.apache.ivy.ant">
+
+    <!-- ==================================================================== -->
+    <!-- Properties                                                         -->
+    <!-- ==================================================================== -->
+    <property name="app.name" value="bookstore"/>
+    <property name="app.version" value="1.0.0"/>
+    <property name="app.main.class" value="com.example.bookstore.BookstoreApplication"/>
+    <property name="java.release" value="21"/>
+
+    <property name="src.dir" value="src/main/java"/>
+    <property name="resources.dir" value="src/main/resources"/>
+    <property name="test.src.dir" value="src/test/java"/>
+
+    <property name="build.dir" value="build"/>
+    <property name="classes.dir" value="${build.dir}/classes"/>
+    <property name="test.classes.dir" value="${build.dir}/test-classes"/>
+    <property name="libs.dir" value="${build.dir}/libs"/>
+    <property name="reports.dir" value="${build.dir}/reports"/>
+    <property name="test.results.dir" value="${reports.dir}/tests"/>
+
+    <property name="jar.file" value="${libs.dir}/${app.name}-${app.version}.jar"/>
+    <property name="server.port" value="8080"/>
+
+    <!-- Fail if the Ivy jar is not available in ${user.home}/.ant/lib. -->
+    <available property="ivy.present" classname="org.apache.ivy.ant.IvyAntSettings"/>
+
+    <!-- ==================================================================== -->
+    <!-- Dependency resolution                                              -->
+    <!-- ==================================================================== -->
+    <target name="check-ivy" unless="ivy.present">
+        <fail message="Apache Ivy is not installed. Download ivy-2.6.0.jar into ${user.home}/.ant/lib and run Ant again."/>
+    </target>
+
+    <target name="resolve" depends="check-ivy" description="Resolves the compile, runtime and test classpaths with Ivy">
+        <ivy:cachepath pathid="compile.classpath" conf="compile"/>
+        <ivy:cachepath pathid="runtime.classpath" conf="runtime"/>
+        <ivy:cachepath pathid="test.classpath" conf="test"/>
+    </target>
+
+    <!-- ==================================================================== -->
+    <!-- Build                                                              -->
+    <!-- ==================================================================== -->
+    <target name="clean" description="Deletes the build directory">
+        <delete dir="${build.dir}"/>
+    </target>
+
+    <target name="compile" depends="resolve" description="Compiles the application sources and copies the resources">
+        <mkdir dir="${classes.dir}"/>
+        <javac srcdir="${src.dir}"
+               destdir="${classes.dir}"
+               classpathref="compile.classpath"
+               release="${java.release}"
+               includeantruntime="false"
+               encoding="UTF-8"
+               debug="true"/>
+        <copy todir="${classes.dir}" overwrite="true">
+            <fileset dir="${resources.dir}"/>
+        </copy>
+    </target>
+
+    <target name="compile-tests" depends="compile" description="Compiles the integration test sources">
+        <mkdir dir="${test.classes.dir}"/>
+        <javac srcdir="${test.src.dir}"
+               destdir="${test.classes.dir}"
+               classpathref="test.classpath"
+               release="${java.release}"
+               includeantruntime="false"
+               encoding="UTF-8"
+               debug="true">
+            <classpath>
+                <pathelement location="${classes.dir}"/>
+            </classpath>
+        </javac>
+    </target>
+
+    <target name="jar" depends="compile" description="Packages the application into an executable jar">
+        <mkdir dir="${libs.dir}"/>
+        <jar destfile="${jar.file}" basedir="${classes.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="${app.main.class}"/>
+                <attribute name="Implementation-Title" value="${app.name}"/>
+                <attribute name="Implementation-Version" value="${app.version}"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <target name="integration-test" depends="compile-tests" description="Runs the integration tests with the JUnit Platform launcher">
+        <mkdir dir="${test.results.dir}"/>
+        <junitlauncher printSummary="true">
+            <classpath>
+                <path refid="test.classpath"/>
+                <pathelement location="${classes.dir}"/>
+                <pathelement location="${test.classes.dir}"/>
+                <pathelement location="${resources.dir}"/>
+            </classpath>
+            <testclasses outputdir="${test.results.dir}">
+                <fileset dir="${test.classes.dir}" includes="**/*IT.class"/>
+                <listener type="legacy-plain" sendSysOut="true"/>
+                <fork includeJUnitPlatformLibraries="false">
+                    <jvmarg value="-Dfile.encoding=UTF-8"/>
+                </fork>
+            </testclasses>
+        </junitlauncher>
+    </target>
+
+    <target name="build" depends="jar, integration-test" description="Compiles, tests and packages the application"/>
+
+</project>

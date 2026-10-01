@@ -1,11 +1,14 @@
-# Gradle
-.gradle/
+# Build output (Gradle, Ant)
 build/
-!gradle/wrapper/gradle-wrapper.jar
+.gradle/
 .kotlin/
+!gradle/wrapper/gradle-wrapper.jar
 
 # Maven
 target/
+
+# Ivy
+.ivy/
 
 # IDE
 .idea/

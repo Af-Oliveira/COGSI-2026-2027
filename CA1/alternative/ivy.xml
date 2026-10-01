@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CA1 alternative solution: dependency descriptor for the Bookstore
+  Spring Boot application.
+
+  Apache Ivy resolves the same libraries that the Gradle build declares in
+  gradle/libs.versions.toml. The Spring Boot BOM (spring-boot-dependencies
+  4.1.1) is imported by the starter POMs, so the starters and their transitive
+  dependencies are versioned by the BOM; only the dependencies that Spring Boot
+  manages but does not pull transitively need an explicit revision.
+-->
+<ivy-module version="2.0">
+
+    <info organisation="com.example"
+          module="bookstore"
+          revision="1.0.0"/>
+
+    <configurations>
+        <conf name="compile" visibility="public" description="Compilation of the application sources"/>
+        <conf name="runtime" extends="compile" visibility="public" description="Execution of the application"/>
+        <conf name="test" extends="runtime" visibility="public" description="Compilation and execution of the integration tests"/>
+    </configurations>
+
+    <dependencies>
+        <!-- Spring Boot starters (versions managed by spring-boot-dependencies 4.1.1). -->
+        <dependency org="org.springframework.boot" name="spring-boot-starter-web" rev="4.1.1"/>
+        <dependency org="org.springframework.boot" name="spring-boot-starter-data-jpa" rev="4.1.1"/>
+        <dependency org="org.springframework.boot" name="spring-boot-starter-hateoas" rev="4.1.1"/>
+        <dependency org="org.springframework.boot" name="spring-boot-starter-actuator" rev="4.1.1"/>
+
+        <!-- In-memory database, runtime only. Revision taken from the BOM (h2.version). -->
+        <dependency org="com.h2database" name="h2" rev="2.4.240" conf="runtime->default(*)"/>
+
+        <!-- Test stack plus the JUnit Platform launcher used by the Ant junitlauncher task. -->
+        <dependency org="org.springframework.boot" name="spring-boot-starter-test" rev="4.1.1" conf="test->default(*)"/>
+        <dependency org="org.junit.platform" name="junit-platform-launcher" rev="6.0.3" conf="test->default(*)"/>
+    </dependencies>
+
+</ivy-module>
