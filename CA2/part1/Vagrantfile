@@ -27,7 +27,10 @@ vm_memory = ENV["VM_MEMORY"] || "2048"
 vm_cpus   = ENV["VM_CPUS"]   || "2"
 
 # Guest-side constants shared by the provisioning scripts.
+bookstore_port = 8080
+chat_port      = 59001
 repo_dir       = "/home/vagrant/COGSI-2026-2027"
+h2_data_dir    = "/h2-data"
 
 Vagrant.configure("2") do |config|
 
@@ -51,8 +54,12 @@ Vagrant.configure("2") do |config|
   # The default project share is disabled: the scripts are uploaded by the
   # shell provisioner and the sources come from the Git clone, so nothing in
   # the VM depends on the host project folder.
+  #
+  # The only share is the folder dedicated to the H2 database files, which
+  # keeps the data on the host across `vagrant reload` and `vagrant destroy`.
   # ===========================================================================
   config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.synced_folder "./h2-data", h2_data_dir
 
   # ===========================================================================
   # PROVIDERS
@@ -100,6 +107,16 @@ Vagrant.configure("2") do |config|
     env: {
       "BUILD_APPS" => build_apps,
       "REPO_DIR"   => repo_dir
+    }
+
+  config.vm.provision "shell",
+    name: "deploy_apps",
+    path: "provisioning/deploy.sh",
+    env: {
+      "REPO_DIR"       => repo_dir,
+      "H2_DATA_DIR"    => h2_data_dir,
+      "BOOKSTORE_PORT" => bookstore_port.to_s,
+      "CHAT_PORT"      => chat_port.to_s
     }
 
 end
