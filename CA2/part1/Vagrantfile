@@ -16,8 +16,18 @@ Vagrant.require_version ">= 2.4.0", "< 3.0.0"
 # -----------------------------------------------------------------------------
 # Host-driven configuration
 # -----------------------------------------------------------------------------
+clone_repo     = ENV["CLONE_REPO"]     || "true"
+build_apps     = ENV["BUILD_APPS"]     || "true"
+
+repo_url     = ENV["REPO_URL"]     || "https://github.com/Af-Oliveira/COGSI-2026-2027.git"
+repo_branch  = ENV["REPO_BRANCH"]  || "main"
+github_token = ENV["GITHUB_TOKEN"] || ""
+
 vm_memory = ENV["VM_MEMORY"] || "2048"
 vm_cpus   = ENV["VM_CPUS"]   || "2"
+
+# Guest-side constants shared by the provisioning scripts.
+repo_dir       = "/home/vagrant/COGSI-2026-2027"
 
 Vagrant.configure("2") do |config|
 
@@ -69,5 +79,27 @@ Vagrant.configure("2") do |config|
   config.vm.provision "shell",
     name: "base_packages",
     path: "provisioning/base.sh"
+
+  # Runs as the vagrant user so that the working copy is not owned by root.
+  config.vm.provision "shell",
+    name: "clone_repository",
+    path: "provisioning/clone.sh",
+    privileged: false,
+    env: {
+      "CLONE_REPO"   => clone_repo,
+      "REPO_URL"     => repo_url,
+      "REPO_BRANCH"  => repo_branch,
+      "REPO_DIR"     => repo_dir,
+      "GITHUB_TOKEN" => github_token
+    }
+
+  config.vm.provision "shell",
+    name: "build_apps",
+    path: "provisioning/build.sh",
+    privileged: false,
+    env: {
+      "BUILD_APPS" => build_apps,
+      "REPO_DIR"   => repo_dir
+    }
 
 end
