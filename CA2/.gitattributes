@@ -4,3 +4,4 @@
 # "/bin/bash^M: bad interpreter".
 *.sh            text eol=lf
 Vagrantfile     text eol=lf
+*.png           binary

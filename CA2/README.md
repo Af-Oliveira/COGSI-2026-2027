@@ -645,7 +645,17 @@ config.vm.network "private_network", ip: vm_ip
     default: Services started.
 ```
 
-On the host, open <http://localhost:8080/books> in the browser, or use `curl`:
+On the host, open <http://localhost:8080/books> in the browser. The list
+includes books created during the persistence test of section 5.8:
+
+![Bookstore opened in the host browser through the forwarded port](assets/part1/bookstore-host-browser.png)
+
+The same page through the private network address,
+<http://192.168.56.10:8080/books>:
+
+![Bookstore opened in the host browser through the private network](assets/part1/bookstore-private-network.png)
+
+The same requests with `curl`:
 
 ```bash
 # the forwarded ports of the machine
@@ -727,32 +737,33 @@ config.vm.network "forwarded_port",
 ```
 
 The clients are started on the host, from the host copy of the repository,
-each in its own terminal:
+each in its own terminal. On Windows the wrapper script is `gradlew.bat`:
 
 ```bash
 cd COGSI-2026-2027/CA1/part1
+
+# compile once, then start one client per terminal
+./gradlew classes
 ./gradlew runClient -PserverIP=localhost -PserverPort=59001
 ```
 
 Each client opens a window that asks for a screen name and then shows the
-conversation. The server log in the VM records the clients joining and
-leaving:
+conversation. Two clients running on the host, exchanging messages through the
+server in the VM:
+
+![Two chat clients on the host connected to the server in the VM](assets/part1/chat-clients-on-host.png)
+
+The server log in the VM records the two clients joining:
 
 ```bash
-vagrant ssh -c 'journalctl -u chat-server --no-pager -o cat -n 5'
+vagrant ssh -c "journalctl -u chat-server --no-pager -o cat -n 6"
 ```
 
-```console
-The chat server is running...
-19:34:10.803 [pool-1-thread-1] INFO  org.example.ChatServer.Handler - A new user has joined: afonso
-19:34:10.873 [pool-1-thread-2] INFO  org.example.ChatServer.Handler - A new user has joined: ricardo
-19:34:10.931 [pool-1-thread-1] INFO  org.example.ChatServer.Handler - afonso has left the chat
-19:34:10.929 [pool-1-thread-2] INFO  org.example.ChatServer.Handler - ricardo has left the chat
-```
+![Chat server journal in the VM showing both users joining](assets/part1/chat-server-log.png)
 
-The log above was produced by a scripted check that opens two connections
-from the host to `127.0.0.1:59001` and speaks the protocol of the application
-directly, which shows the complete path from the host to the server in the VM:
+The same path was also checked without the graphical client, with a script
+that opens two connections from the host to `127.0.0.1:59001` and speaks the
+protocol of the application directly:
 
 ```console
 [afonso] <- SUBMITNAME
@@ -763,6 +774,13 @@ directly, which shows the complete path from the host to the server in the VM:
 [afonso] <- MESSAGE afonso: hello from the host
 [ricardo] <- MESSAGE afonso: hello from the host
 ```
+
+> - `./gradlew classes` is run first because the two clients share the same
+>   project folder. When both were started at the same time on a project that
+>   had never been compiled on the host, the two builds wrote
+>   `app/build/classes` concurrently and one client failed with
+>   `ClassNotFoundException: org.example.ChatClientApp`. Starting it again,
+>   with the classes already compiled, worked.
 
 > - `runClient` is the CA1 task that starts `ChatClientApp` with the server
 >   address and port given as Gradle properties. `localhost:59001` on the host
