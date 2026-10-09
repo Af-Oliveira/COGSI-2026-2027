@@ -1,0 +1,73 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# =============================================================================
+# Vagrantfile - COGSI CA2 / Part 1
+# -----------------------------------------------------------------------------
+# A single Ubuntu 24.04 VM that clones the group repository, builds the two
+# CA1 applications and runs them as services:
+#   - Bookstore (Spring Boot, Gradle)  -> guest port 8080
+#   - Chat server (Gradle demo)        -> guest port 59001
+#
+# =============================================================================
+
+Vagrant.require_version ">= 2.4.0", "< 3.0.0"
+
+# -----------------------------------------------------------------------------
+# Host-driven configuration
+# -----------------------------------------------------------------------------
+vm_memory = ENV["VM_MEMORY"] || "2048"
+vm_cpus   = ENV["VM_CPUS"]   || "2"
+
+Vagrant.configure("2") do |config|
+
+  # ===========================================================================
+  # BOX
+  # ---------------------------------------------------------------------------
+  # Bento boxes are built by Progress Chef from public Packer templates
+  # (github.com/chef/bento) and are the boxes recommended by the Vagrant
+  # documentation. The version is pinned so that every team member and every
+  # rebuild starts from exactly the same image.
+  # ===========================================================================
+  config.vm.box = "bento/ubuntu-24.04"
+  config.vm.box_version = "202510.26.0"
+  config.vm.box_check_update = false
+
+  config.vm.hostname = "cogsi-ca2-part1"
+
+  # ===========================================================================
+  # SYNCED FOLDERS
+  # ---------------------------------------------------------------------------
+  # The default project share is disabled: the scripts are uploaded by the
+  # shell provisioner and the sources come from the Git clone, so nothing in
+  # the VM depends on the host project folder.
+  # ===========================================================================
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # ===========================================================================
+  # PROVIDERS
+  # ===========================================================================
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "cogsi-ca2-part1"
+    vb.memory = vm_memory
+    vb.cpus = vm_cpus
+    vb.gui = false
+  end
+
+  config.vm.provider "vmware_desktop" do |vmware|
+    vmware.vmx["memsize"] = vm_memory
+    vmware.vmx["numvcpus"] = vm_cpus
+  end
+
+  # ===========================================================================
+  # PROVISIONING
+  # ---------------------------------------------------------------------------
+  # One named provisioner per step, so that each one can be re-run on its own
+  # with `vagrant provision --provision-with <name>`. Every script is
+  # idempotent and the optional steps are switched by the variables above.
+  # ===========================================================================
+  config.vm.provision "shell",
+    name: "base_packages",
+    path: "provisioning/base.sh"
+
+end
