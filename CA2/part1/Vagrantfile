@@ -9,6 +9,29 @@
 #   - Bookstore (Spring Boot, Gradle)  -> guest port 8080
 #   - Chat server (Gradle demo)        -> guest port 59001
 #
+# Directory structure:
+#   .
+#   ├── Vagrantfile
+#   ├── provisioning/
+#   │   ├── base.sh      project dependencies (Git, JDK)
+#   │   ├── clone.sh     clones or updates the group repository
+#   │   ├── build.sh     builds both applications with the Gradle Wrapper
+#   │   ├── deploy.sh    installs artifacts, H2 configuration and systemd units
+#   │   └── start.sh     starts the services (runs on every boot)
+#   └── h2-data/         synced folder dedicated to the H2 database files
+#
+# Host environment variables (all optional):
+#   CLONE_REPO=true|false       clone/update the repository       (default true)
+#   BUILD_APPS=true|false       build the applications             (default true)
+#   START_SERVICES=true|false   start the services                 (default true)
+#   REPO_URL, REPO_BRANCH       repository and branch to clone
+#   GITHUB_TOKEN                access token, only for a private repository
+#   VM_MEMORY, VM_CPUS, VM_IP   VM resources and private network address
+#   BOOKSTORE_HOST_PORT, CHAT_HOST_PORT   host side of the forwarded ports
+#
+# Example:
+#   START_SERVICES=false vagrant up
+#   vagrant provision --provision-with build_apps
 # =============================================================================
 
 Vagrant.require_version ">= 2.4.0", "< 3.0.0"
@@ -18,6 +41,7 @@ Vagrant.require_version ">= 2.4.0", "< 3.0.0"
 # -----------------------------------------------------------------------------
 clone_repo     = ENV["CLONE_REPO"]     || "true"
 build_apps     = ENV["BUILD_APPS"]     || "true"
+start_services = ENV["START_SERVICES"] || "true"
 
 repo_url     = ENV["REPO_URL"]     || "https://github.com/Af-Oliveira/COGSI-2026-2027.git"
 repo_branch  = ENV["REPO_BRANCH"]  || "main"
@@ -25,6 +49,10 @@ github_token = ENV["GITHUB_TOKEN"] || ""
 
 vm_memory = ENV["VM_MEMORY"] || "2048"
 vm_cpus   = ENV["VM_CPUS"]   || "2"
+vm_ip     = ENV["VM_IP"]     || "192.168.56.10"
+
+bookstore_host_port = (ENV["BOOKSTORE_HOST_PORT"] || "8080").to_i
+chat_host_port      = (ENV["CHAT_HOST_PORT"]      || "59001").to_i
 
 # Guest-side constants shared by the provisioning scripts.
 bookstore_port = 8080
@@ -60,6 +88,24 @@ Vagrant.configure("2") do |config|
   # ===========================================================================
   config.vm.synced_folder ".", "/vagrant", disabled: true
   config.vm.synced_folder "./h2-data", h2_data_dir
+
+  # ===========================================================================
+  # NETWORKING
+  # ---------------------------------------------------------------------------
+  # Forwarded ports are bound to the loopback interface of the host, so the
+  # applications are reachable from the host but not from the rest of the LAN.
+  # ===========================================================================
+  config.vm.network "forwarded_port",
+    guest: bookstore_port, host: bookstore_host_port,
+    host_ip: "127.0.0.1", auto_correct: true
+
+  config.vm.network "forwarded_port",
+    guest: chat_port, host: chat_host_port,
+    host_ip: "127.0.0.1", auto_correct: true
+
+  # Static address on the host-only network, as an alternative to the
+  # forwarded ports (e.g. http://192.168.56.10:8080).
+  config.vm.network "private_network", ip: vm_ip
 
   # ===========================================================================
   # PROVIDERS
@@ -114,6 +160,20 @@ Vagrant.configure("2") do |config|
     path: "provisioning/deploy.sh",
     env: {
       "REPO_DIR"       => repo_dir,
+      "H2_DATA_DIR"    => h2_data_dir,
+      "BOOKSTORE_PORT" => bookstore_port.to_s,
+      "CHAT_PORT"      => chat_port.to_s
+    }
+
+  # The services are not enabled at boot. This provisioner runs on every
+  # `vagrant up` and `vagrant reload`, after Vagrant has mounted the H2 folder,
+  # so the start-up always finds the database and obeys START_SERVICES.
+  config.vm.provision "shell",
+    name: "start_services",
+    path: "provisioning/start.sh",
+    run: "always",
+    env: {
+      "START_SERVICES" => start_services,
       "H2_DATA_DIR"    => h2_data_dir,
       "BOOKSTORE_PORT" => bookstore_port.to_s,
       "CHAT_PORT"      => chat_port.to_s
