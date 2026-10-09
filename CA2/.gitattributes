@@ -1,0 +1,6 @@
+# Files that are executed or parsed inside the Linux guests must keep LF line
+# endings, even when the repository is checked out on a Windows host with
+# core.autocrlf enabled. A CRLF shebang line breaks a provisioning script with
+# "/bin/bash^M: bad interpreter".
+*.sh            text eol=lf
+Vagrantfile     text eol=lf

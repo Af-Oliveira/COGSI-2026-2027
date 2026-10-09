@@ -1,0 +1,8 @@
+# Vagrant runtime state: machine IDs and the SSH keys generated for each VM.
+# They are unique to the local machine and must never be shared.
+.vagrant/
+
+# H2 database files written by the VM through the dedicated synced folder.
+# Only the placeholder that keeps the host folder in the repository is tracked.
+part1/h2-data/*
+!part1/h2-data/.gitkeep
