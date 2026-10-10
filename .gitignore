@@ -4,6 +4,9 @@ build/
 .kotlin/
 !gradle/wrapper/gradle-wrapper.jar
 
+# Classes compiled by the IDE (Eclipse, VS Code Java extension)
+bin/
+
 # Maven
 target/
 
