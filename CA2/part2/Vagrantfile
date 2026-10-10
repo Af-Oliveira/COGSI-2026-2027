@@ -154,6 +154,22 @@ Vagrant.configure("2") do |config|
             "DB_IP"   => machine[:ip],
             "APP_IP"  => MACHINES["app"][:ip]
           }
+
+      when "app"
+        node.vm.provision "shell",
+          name: "app_setup",
+          path: "provisioning/app.sh",
+          env: {
+            "REPO_URL"     => repo_url,
+            "REPO_BRANCH"  => repo_branch,
+            "GITHUB_TOKEN" => github_token,
+            "DB_HOST"      => "db",
+            "H2_PORT"      => H2_PORT.to_s,
+            "DB_USER"      => db_user,
+            "DB_PASSWORD"  => db_password,
+            "APP_PORT"     => APP_PORT.to_s,
+            "PROXY_IP"     => MACHINES["proxy"][:ip]
+          }
       end
     end
   end
