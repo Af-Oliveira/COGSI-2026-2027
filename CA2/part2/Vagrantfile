@@ -71,6 +71,24 @@ APP_PORT = 8080
 # Lines appended to /etc/hosts of every machine, so they find each other by name.
 hosts_entries = MACHINES.map { |name, machine| "#{machine[:ip]} #{name}" }.join("\n")
 
+# -----------------------------------------------------------------------------
+# Custom SSH keys
+# -----------------------------------------------------------------------------
+# One ed25519 key pair per machine, generated on the host the first time the
+# Vagrantfile is loaded. The private keys stay in ./keys, which Git ignores.
+keys_dir = File.join(__dir__, "keys")
+insecure_keys = Dir.glob(File.join(Dir.home, ".vagrant.d", "insecure_private_keys", "*"))
+
+MACHINES.each_key do |name|
+  private_key = File.join(keys_dir, "#{name}_ed25519")
+  next if File.exist?(private_key)
+
+  Dir.mkdir(keys_dir) unless Dir.exist?(keys_dir)
+  generated = system("ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                     "-C", "cogsi-ca2-#{name}", "-f", private_key)
+  raise "ssh-keygen failed for '#{name}'. Is OpenSSH installed on the host?" unless generated
+end
+
 Vagrant.configure("2") do |config|
 
   # ===========================================================================
@@ -82,6 +100,10 @@ Vagrant.configure("2") do |config|
 
   # Nothing in the guests depends on the host project folder.
   config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # Vagrant must not generate its own replacement key: each machine receives
+  # the key created above through the ssh_key provisioner.
+  config.ssh.insert_key = false
 
   MACHINES.each do |name, machine|
     config.vm.define name, primary: name == "app" do |node|
@@ -100,6 +122,19 @@ Vagrant.configure("2") do |config|
         vmware.vmx["memsize"] = machine[:memory]
         vmware.vmx["numvcpus"] = machine[:cpus]
       end
+
+      # -----------------------------------------------------------------------
+      # SSH: the custom key is tried first. The insecure key is only accepted
+      # on the very first boot, until ssh_key removes it from the guest.
+      # -----------------------------------------------------------------------
+      private_key = File.join(keys_dir, "#{name}_ed25519")
+      node.ssh.private_key_path = [private_key] + insecure_keys
+
+      node.vm.provision "shell",
+        name: "ssh_key",
+        path: "provisioning/ssh-key.sh",
+        privileged: false,
+        env: { "PUBLIC_KEY" => File.read("#{private_key}.pub").strip }
 
       node.vm.provision "shell",
         name: "base_packages",
