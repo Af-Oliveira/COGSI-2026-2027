@@ -261,6 +261,19 @@ git log --oneline feature/ca2-part1-vagrant -5
 >   that completes a story uses `Closes #<issue>`, which GitHub applies when
 >   the branch is merged into `main`.
 
+> Include a self-evaluation for each team member on a 0 - 100% scale
+> representing their contribution. These percentages will be used to determine
+> individual grading
+
+| Team member | Contribution |
+| --- | --- |
+| Afonso Oliveira (`Af-Oliveira`) | 50% |
+| Ricardo Freitas (`rmotafreitas`) | 50% |
+
+The two members worked on the assignment together, which is why every commit
+has one member as author and the other as co-author. The percentages are the
+same as in CA1.
+
 ---
 
 ## 5. Part 1 - First week
