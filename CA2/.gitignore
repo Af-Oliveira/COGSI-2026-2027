@@ -6,3 +6,6 @@
 # Only the placeholder that keeps the host folder in the repository is tracked.
 part1/h2-data/*
 !part1/h2-data/.gitkeep
+
+# SSH key pairs generated for each Part 2 machine. Private keys are secrets.
+part2/keys/
