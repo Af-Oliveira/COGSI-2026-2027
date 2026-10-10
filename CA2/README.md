@@ -25,7 +25,8 @@ the assignment.
 3. [Repository layout](#3-repository-layout)
 4. [Operative guidelines](#4-operative-guidelines)
 5. [Part 1 - First week](#5-part-1---first-week)
-6. [References](#6-references)
+6. [Part 2 - Second week](#6-part-2---second-week)
+7. [References](#7-references)
 
 ---
 
@@ -44,6 +45,12 @@ them as services:
 The Bookstore stores its H2 database on disk, in a synced folder dedicated to
 the database, so the data survives a restart and even the destruction of the
 VM.
+
+Part 2 splits the Bookstore into three machines on a private network: `db`
+runs the H2 engine in server mode, `app` runs the Spring Boot application as a
+JDBC client of that server, and `proxy` runs Nginx as the only entry point.
+Each machine has its own SSH key, firewalls restrict who can talk to whom, and
+the application waits for the database port before it starts.
 
 ---
 
@@ -111,15 +118,25 @@ COGSI-2026-2027/
     ├── README.md             (this technical report)
     ├── .gitignore            (.vagrant/ and the H2 database files)
     ├── .gitattributes        (LF line endings for files that run in the guest)
-    └── part1/
-        ├── Vagrantfile
+    ├── assets/               (screenshots used in this report)
+    ├── part1/
+    │   ├── Vagrantfile
+    │   ├── provisioning/
+    │   │   ├── base.sh       (project dependencies)
+    │   │   ├── clone.sh      (clone or update the group repository)
+    │   │   ├── build.sh      (build both applications)
+    │   │   ├── deploy.sh     (artifacts, H2 configuration, systemd units)
+    │   │   └── start.sh      (start the services, on every boot)
+    │   └── h2-data/          (synced folder dedicated to the H2 database)
+    └── part2/
+        ├── Vagrantfile       (db, app and proxy machines)
         ├── provisioning/
-        │   ├── base.sh       (project dependencies)
-        │   ├── clone.sh      (clone or update the group repository)
-        │   ├── build.sh      (build both applications)
-        │   ├── deploy.sh     (artifacts, H2 configuration, systemd units)
-        │   └── start.sh      (start the services, on every boot)
-        └── h2-data/          (synced folder dedicated to the H2 database)
+        │   ├── base.sh       (common tools and /etc/hosts, all machines)
+        │   ├── ssh-key.sh    (custom SSH key, all machines)
+        │   ├── db.sh         (H2 server and firewall)
+        │   ├── app.sh        (Bookstore, health check and firewall)
+        │   └── proxy.sh      (Nginx reverse proxy)
+        └── keys/             (generated SSH keys, not versioned)
 ```
 
 ---
@@ -1242,7 +1259,730 @@ CA2/part1/provisioning/start.sh
 
 ---
 
-## 6. References
+## 6. Part 2 - Second week
+
+> The goal of Part 2 of this assignment is to use Vagrant to setup a virtual
+> environment with at least two VMs to execute the Gradle version of the
+> Bookstore Spring Boot application
+> - A dedicated VM hosting the Spring Boot application (app)
+> - A separate, isolated VM running the H2 Database engine (db)
+
+Part 2 lives in `CA2/part2` and defines three machines in one `Vagrantfile`.
+To reproduce it:
+
+```bash
+cd COGSI-2026-2027/CA2/part2
+vagrant validate
+vagrant up
+vagrant status
+```
+
+```console
+Vagrantfile validated successfully.
+
+db                        running (virtualbox)
+app                       running (virtualbox)
+proxy                     running (virtualbox)
+```
+
+> - `vagrant up` creates the machines in the order they are defined: `db`,
+>   then `app`, then `proxy`. The order matters, because the application needs
+>   the database and the proxy needs the application.
+> - On the host used for this report the complete `vagrant up` took 11
+>   minutes, with `APP_CPUS=1` for the reason given in section 5.10.
+> - As in Part 1, the output snippets are abridged.
+
+### 6.1. Network topology
+
+> Document the network topology, including the IP addresses/hostnames and the
+> allowed communication between VMs
+
+```text
+                      Host (Windows, 192.168.56.1)
+                               |
+                 browser: http://localhost:8080
+                               |
+                 forwarded port 8080 -> 80 (loopback only)
+                               v
+        +----------------------------------------------+
+        | proxy   192.168.56.20   Nginx        :80     |
+        +----------------------------------------------+
+                               |
+                 HTTP :8080, allowed by ufw only from proxy
+                               v
+        +----------------------------------------------+
+        | app     192.168.56.21   Spring Boot  :8080   |
+        +----------------------------------------------+
+                               |
+                 JDBC/TCP :9092, allowed by ufw only from app
+                               v
+        +----------------------------------------------+
+        | db      192.168.56.22   H2 server    :9092   |
+        +----------------------------------------------+
+
+        Private network 192.168.56.0/24 (VirtualBox host-only)
+```
+
+| Machine | Hostname | Private address | Service | Listening port | Published to the host |
+| --- | --- | --- | --- | --- | --- |
+| `proxy` | `proxy` | 192.168.56.20 | Nginx reverse proxy | 80 | host `127.0.0.1:8080` -> guest 80 |
+| `app` | `app` | 192.168.56.21 | Bookstore (`bookstore.service`) | 8080 | no |
+| `db` | `db` | 192.168.56.22 | H2 TCP server (`h2.service`) | 9092 | no |
+
+| From | To | Port | Allowed | Enforced by |
+| --- | --- | --- | --- | --- |
+| host | `proxy` | 80 (through host port 8080) | yes | forwarded port bound to the host loopback |
+| `proxy` | `app` | 8080 | yes | ufw rule on `app` |
+| `app` | `db` | 9092 | yes | ufw rule on `db` |
+| host | `app` | 8080 | no | ufw on `app` (default deny) |
+| host, `proxy` | `db` | 9092 | no | ufw on `db` (default deny) |
+| host | any machine | 22 | yes | SSH with the key of that machine, used by Vagrant |
+
+The topology is a single table in the `Vagrantfile`, from which the machines,
+their addresses and the `/etc/hosts` entries are derived:
+
+```ruby
+MACHINES = {
+  "db"    => { ip: "192.168.56.22", memory: "768",      cpus: "1" },
+  "app"   => { ip: "192.168.56.21", memory: app_memory, cpus: app_cpus },
+  "proxy" => { ip: "192.168.56.20", memory: "512",      cpus: "1" }
+}
+
+hosts_entries = MACHINES.map { |name, machine| "#{machine[:ip]} #{name}" }.join("\n")
+
+MACHINES.each do |name, machine|
+  config.vm.define name, primary: name == "app" do |node|
+    node.vm.hostname = name
+    node.vm.network "private_network", ip: machine[:ip]
+    # ...
+  end
+end
+```
+
+```console
+==> db: Running provisioner: base_packages (shell)...
+    db: [CONFIG] /etc/hosts updated:
+    db:          192.168.56.22 db
+    db:          192.168.56.21 app
+    db:          192.168.56.20 proxy
+```
+
+> - `config.vm.define` declares a machine inside a multi-machine environment.
+>   Every Vagrant command accepts the machine name (`vagrant ssh db`,
+>   `vagrant provision app`); `primary: true` makes `app` the default target.
+> - Each machine keeps the NAT adapter that Vagrant uses for SSH and gains a
+>   second adapter on the private network with a static address. Static
+>   addresses are required here because the firewall rules name them.
+> - `provisioning/base.sh` runs on every machine and writes the three
+>   addresses to `/etc/hosts`, between two marker lines. The machines then
+>   reach each other by name (`db`, `app`, `proxy`), and repeating the
+>   provisioning replaces the block instead of appending to it.
+> - With VirtualBox the host also has an address on the host-only network
+>   (192.168.56.1), so the private network alone does not isolate the
+>   machines from the host. The isolation in the table is enforced by the
+>   firewalls, and section 6.6 shows that the host cannot reach `app` or `db`.
+
+### 6.2. Resource allocation
+
+> Allocate sufficient CPU, memory, and disk resources for the applications to
+> run reliably
+
+| Machine | CPUs | Memory | Measured use | Justification |
+| --- | --- | --- | --- | --- |
+| `db` | 1 | 768 MB | 332 MB used, H2 process 65 MB | H2 serves one small client; one CPU and under 1 GB leave ample margin. |
+| `app` | 2 (`APP_CPUS`) | 2048 MB (`APP_MEMORY`) | 586 MB used with the Bookstore running | The peak is the Gradle build during provisioning, which runs a compiler JVM next to the Gradle JVM. |
+| `proxy` | 1 | 512 MB | not measured | Nginx forwarding to a single upstream needs very little. |
+
+> - Separating the tiers makes these numbers observable per machine:
+>   `vagrant ssh db -c 'free -m'` shows the database alone, which is not
+>   possible when both processes share one VM.
+> - The disk is the default of the box, a 31 GB root volume, of which about
+>   5 GB are used on a machine with the JDK, the clone and the Gradle caches.
+>   No machine needs more, so the disk was not resized.
+> - The total is 3.3 GB of memory, which fits the 16 GB host with the
+>   hypervisor overhead. `APP_MEMORY` and `APP_CPUS` adjust the largest
+>   machine without editing the file.
+
+### 6.3. H2 in server mode on the db machine
+
+> By default, Spring Boot configures the application to connect to an in-memory
+> store with the username sa and an empty password
+> - Change that for H2 to run in server mode
+> - In server mode, an instance of H2 database engine runs as the server in a
+>   separate process, and your Spring Boot application connects as a client via
+>   JDBC
+
+`provisioning/db.sh` installs a Java runtime and the H2 jar and runs the
+engine as a service:
+
+```ini
+# /etc/systemd/system/h2.service (excerpt)
+[Service]
+User=h2
+WorkingDirectory=/var/lib/h2
+ExecStart=/usr/bin/java -cp /opt/h2/h2-2.4.240.jar org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort 9092 -baseDir /var/lib/h2 -ifNotExists
+```
+
+```console
+==> db: Running provisioner: db_setup (shell)...
+    db: Provisioning the database machine...
+    db: [INSTALL] Installing: openjdk-21-jre-headless
+    db: [DOWNLOAD] https://repo1.maven.org/maven2/com/h2database/h2/2.4.240/h2-2.4.240.jar
+    db: [CONFIG] System user h2 created.
+    db: [CONFIG] h2.service installed and (re)started.
+    db: [READY] H2 is listening on port 9092.
+    db: Database machine ready.
+```
+
+```bash
+vagrant ssh db -c 'systemctl status h2 --no-pager | sed -n 1,4p; ss -ltnH | grep 9092; sudo ls -l /var/lib/h2'
+```
+
+```console
+● h2.service - H2 database engine in server mode (COGSI)
+     Loaded: loaded (/etc/systemd/system/h2.service; enabled; preset: enabled)
+     Active: active (running) since Fri 2026-10-09 23:40:19 UTC; 10min ago
+   Main PID: 2866 (java)
+LISTEN 0      50                 *:9092       *:*
+-rw-r--r-- 1 h2 h2 40960 Oct  9 23:49 bookstore.mv.db
+```
+
+> - `org.h2.tools.Server -tcp` starts only the TCP server. The web console
+>   and the PostgreSQL-compatible server of H2 are not started, so the
+>   machine exposes a single database port.
+> - `-tcpAllowOthers` accepts connections from other machines; without it H2
+>   only accepts clients on the same machine.
+> - `-baseDir /var/lib/h2` confines every database to that directory, and
+>   `-ifNotExists` lets the first connection of the application create the
+>   `bookstore` database. Allowing remote creation is acceptable only because
+>   the firewall restricts the port to the `app` machine (section 6.6).
+> - The jar is downloaded from Maven Central in the exact version that the
+>   Bookstore build resolves (H2 2.4.240, managed by Spring Boot 4.1.1), so
+>   the JDBC client and the server speak the same protocol. Its SHA-1 is
+>   checked against the value published by Maven Central before it is used.
+> - The service runs as the system user `h2`, which owns the data directory
+>   and has no login shell.
+> - The database files are on the disk of the `db` machine, not in a synced
+>   folder. Part 1 demonstrated the synced folder; here the database machine
+>   owns its storage, as a database server would, and the service can be
+>   enabled at boot without depending on a share. The data survives
+>   `vagrant reload` and the destruction of the other machines, and is lost
+>   only if `db` itself is destroyed.
+
+### 6.4. Connecting the Bookstore to the H2 server
+
+> The Bookstore application must connect to the H2 server running on the db VM
+> over the private network
+
+`provisioning/app.sh` clones the repository, builds the Gradle version of the
+Bookstore (`CA1/part2`) and writes the configuration that replaces the
+in-memory datasource:
+
+```properties
+# /etc/bookstore/application.properties (password line omitted)
+spring.datasource.url=jdbc:h2:tcp://db:9092/./bookstore
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=bookstore
+spring.jpa.hibernate.ddl-auto=update
+server.port=8080
+spring.jpa.show-sql=false
+```
+
+```ruby
+db_user     = ENV["DB_USER"]     || "bookstore"
+db_password = ENV["DB_PASSWORD"] || "bookstore-dev"
+```
+
+```console
+==> app: Running provisioner: app_setup (shell)...
+    app: [INSTALL] Installing: openjdk-21-jdk-headless
+    app: [CLONE] Cloning https://github.com/Af-Oliveira/COGSI-2026-2027.git (main) into /home/vagrant/COGSI-2026-2027
+    app: [BUILD] CA1/part2: ./gradlew bootJar
+    app: BUILD SUCCESSFUL in 3m 19s
+    app: [DEPLOY] /opt/bookstore/bookstore.jar
+    app: [DEPLOY] /etc/bookstore/application.properties
+    app: [DEPLOY] /usr/local/bin/wait-for-port
+    app: [DEPLOY] /etc/systemd/system/bookstore.service
+    app: [START] bookstore
+    app: [READY] Bookstore on port 8080 (after 21s)
+```
+
+**Verification.** A book is created through the API, the `app` machine is
+destroyed and created again, and the book is still returned, because it is
+stored on `db`:
+
+```bash
+# create a book (PowerShell: Invoke-RestMethod -Method Post -Uri ... -Body '{...}')
+curl -s -X POST http://localhost:8080/books -H "Content-Type: application/json" \
+  -d '{"title":"Remote DB","author":"CA2","price":2}'
+
+# recreate only the application machine
+vagrant destroy -f app
+vagrant up app
+
+curl -s http://localhost:8080/books
+```
+
+```console
+{"author":"CA2","id":3,"price":2.0,"title":"Remote DB"}
+
+==> app: Destroying VM and associated drives...
+    app: [CLONE] Cloning https://github.com/Af-Oliveira/COGSI-2026-2027.git (main) into /home/vagrant/COGSI-2026-2027
+    app: BUILD SUCCESSFUL in 2m 28s
+    app: [READY] Bookstore on port 8080 (after 22s)
+
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"},{"author":"CA2","id":3,"price":2.0,"title":"Remote DB"},{"author":"Robert C. Martin","id":52,"price":30.0,"title":"Clean Code"}, ...]
+```
+
+> - `jdbc:h2:tcp://db:9092/./bookstore` makes the application a client of the
+>   remote engine. `db` is resolved through `/etc/hosts` to 192.168.56.22, on
+>   the private network; `./bookstore` is relative to the base directory of
+>   the server.
+> - The default `sa` user with an empty password is no longer used. The
+>   credentials come from the host environment (`DB_USER`, `DB_PASSWORD`) and
+>   are passed to the script with `env:`. The defaults exist so that
+>   `vagrant up` works without configuration in a development environment;
+>   they are not secrets and must be overridden anywhere else.
+> - The file that holds the password has mode `0640` and belongs to
+>   `root:vagrant`, so only root and the user that runs the application can
+>   read it.
+> - The repeated sample books are the effect of the sample data initialiser
+>   explained in section 5.8.
+
+### 6.5. Custom SSH keys
+
+> Generate and configure custom SSH keys for each VM instead of relying on
+> Vagrant's default insecure keys
+
+Every Vagrant box accepts the same, publicly known "insecure" key. The
+`Vagrantfile` generates one key pair per machine on the host and tells Vagrant
+to use it:
+
+```ruby
+keys_dir = File.join(__dir__, "keys")
+insecure_keys = Dir.glob(File.join(Dir.home, ".vagrant.d", "insecure_private_keys", "*"))
+
+MACHINES.each_key do |name|
+  private_key = File.join(keys_dir, "#{name}_ed25519")
+  next if File.exist?(private_key)
+
+  Dir.mkdir(keys_dir) unless Dir.exist?(keys_dir)
+  generated = system("ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                     "-C", "cogsi-ca2-#{name}", "-f", private_key)
+  raise "ssh-keygen failed for '#{name}'. Is OpenSSH installed on the host?" unless generated
+end
+
+config.ssh.insert_key = false
+
+# inside each machine
+node.ssh.private_key_path = [private_key] + insecure_keys
+
+node.vm.provision "shell",
+  name: "ssh_key",
+  path: "provisioning/ssh-key.sh",
+  privileged: false,
+  env: { "PUBLIC_KEY" => File.read("#{private_key}.pub").strip }
+```
+
+```console
+==> db: Running provisioner: ssh_key (shell)...
+    db: [CONFIG] Custom key installed; the Vagrant insecure key was removed.
+    db: [INFO] 256 SHA256:nxXq2Yhib+U0LtOZmgQRTf82KPJJEoRSSqPrYMkqhjY cogsi-ca2-db (ED25519)
+```
+
+```bash
+# the key Vagrant uses for each machine
+vagrant ssh-config | grep -E '^Host|Port|IdentityFile'
+
+# the only key accepted by the db machine
+vagrant ssh db -c 'cat ~/.ssh/authorized_keys'
+
+# the insecure key is refused, the custom key is accepted (db is on port 2222)
+ssh -i ~/.vagrant.d/insecure_private_keys/vagrant.key.ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -p 2222 vagrant@127.0.0.1 "echo LOGGED-IN"
+ssh -i keys/db_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -p 2222 vagrant@127.0.0.1 'echo LOGGED-IN as $(whoami) on $(hostname)'
+```
+
+```console
+Host db
+  Port 2222
+  IdentityFile C:/Users/elisa/Documents/Afonso/COGSI-2026-2027/CA2/part2/keys/db_ed25519
+  IdentityFile C:/Users/elisa/.vagrant.d/insecure_private_keys/vagrant.key.ed25519
+  IdentityFile C:/Users/elisa/.vagrant.d/insecure_private_keys/vagrant.key.rsa
+Host app
+  Port 2200
+  IdentityFile C:/Users/elisa/Documents/Afonso/COGSI-2026-2027/CA2/part2/keys/app_ed25519
+  ...
+Host proxy
+  Port 2201
+  IdentityFile C:/Users/elisa/Documents/Afonso/COGSI-2026-2027/CA2/part2/keys/proxy_ed25519
+  ...
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINquSl8LOT9Wc3sOxAwzFQowlbYehnsMQznWQ8q0mv+C cogsi-ca2-db
+
+vagrant@127.0.0.1: Permission denied (publickey,password).
+LOGGED-IN as vagrant on db
+```
+
+> - The keys are generated by `ssh-keygen` the first time the `Vagrantfile`
+>   is loaded and are reused afterwards, so the step is automatic and
+>   repeatable. `part2/keys/` is ignored by Git: a private key is a secret and
+>   every clone of the repository generates its own.
+> - `config.ssh.insert_key = false` stops Vagrant from replacing the insecure
+>   key with a key that it generates and stores in `.vagrant/`. The key in
+>   use is the one created explicitly for each machine.
+> - On the very first boot the guest only knows the insecure key, so it stays
+>   in `private_key_path` as a fallback after the custom key. The `ssh_key`
+>   provisioner is the first to run: it rewrites `authorized_keys` with the
+>   public key of that machine only. From then on the insecure key is refused,
+>   as the test shows, and Vagrant connects with the custom key, which is
+>   first in the list.
+> - Each machine has a different key, so the key of one machine does not open
+>   the others. `vagrant ssh-config` exposes these details, which `vagrant
+>   ssh` hides.
+
+### 6.6. Firewall on the db machine
+
+> Secure the db VM by adding firewall rules to restrict access only to the app
+> VM
+> - Add a firewall rule using ufw (Uncomplicated Firewall) to only allow
+>   connections from the app VM to the H2 database port (9092)
+
+```bash
+# provisioning/db.sh
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp
+ufw allow from "$APP_IP" to "$DB_IP" port "$H2_PORT" proto tcp
+ufw --force enable
+```
+
+```bash
+vagrant ssh db -c 'sudo ufw status verbose'
+
+# from the application machine, from the proxy machine and from the host
+vagrant ssh app -c 'nc -zv -w 3 db 9092'
+vagrant ssh proxy -c 'nc -zv -w 3 db 9092'
+(Test-NetConnection 192.168.56.22 -Port 9092).TcpTestSucceeded     # PowerShell, on the host
+```
+
+```console
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), disabled (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW IN    Anywhere
+192.168.56.22 9092/tcp     ALLOW IN    192.168.56.21
+22/tcp (v6)                ALLOW IN    Anywhere (v6)
+
+Connection to db (192.168.56.22) 9092 port [tcp/*] succeeded!
+nc: connect to db (192.168.56.22) port 9092 (tcp) timed out: Operation now in progress
+False
+```
+
+> - `default deny incoming` drops every connection that is not explicitly
+>   allowed, so the rule for port 9092 is an exception to a closed firewall
+>   and not one blocked port in an open one.
+> - `ufw allow from 192.168.56.21 to 192.168.56.22 port 9092 proto tcp`
+>   allows the H2 port only when the source is the `app` machine and the
+>   destination is the private address of `db`.
+> - Port 22 stays open because Vagrant manages the machine through SSH;
+>   closing it would make `vagrant ssh` and `vagrant provision` fail. Access
+>   through it requires the key of the machine (section 6.5).
+> - `ufw --force enable` enables the firewall without the interactive
+>   confirmation. `ufw` skips a rule that already exists, so the commands can
+>   be repeated.
+> - The same approach protects the `app` machine, where port 8080 is allowed
+>   only from the proxy: a request from the host to
+>   `http://192.168.56.21:8080/books` timed out.
+
+### 6.7. Health check before the Bookstore starts
+
+> Implement a health check that verifies H2 TCP port availability before the
+> Bookstore application startup
+
+`provisioning/app.sh` installs `/usr/local/bin/wait-for-port` and makes it a
+precondition of the service:
+
+```bash
+# /usr/local/bin/wait-for-port <host> <port> [timeout]
+for ((elapsed = 0; elapsed < timeout; elapsed += 2)); do
+    if nc -z -w 2 "$host" "$port" 2>/dev/null; then
+        echo "$host:$port is accepting connections (after ${elapsed}s)."
+        exit 0
+    fi
+    echo "Waiting for $host:$port (${elapsed}s of ${timeout}s)..."
+    sleep 2
+done
+
+echo "$host:$port is not reachable after ${timeout}s - giving up." >&2
+exit 1
+```
+
+```ini
+# /etc/systemd/system/bookstore.service (excerpt)
+[Service]
+ExecStartPre=/usr/local/bin/wait-for-port db 9092 60
+ExecStart=/usr/bin/java -jar /opt/bookstore/bookstore.jar --spring.config.additional-location=file:/etc/bookstore/
+Restart=on-failure
+RestartSec=10
+```
+
+With the database stopped, the application is not started:
+
+```bash
+vagrant ssh db -c 'sudo systemctl stop h2'
+vagrant ssh app -c 'sudo systemctl restart bookstore; journalctl -u bookstore --no-pager -o cat -n 6'
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/books
+```
+
+```console
+Job for bookstore.service failed because the control process exited with error code.
+Waiting for db:9092 (56s of 60s)...
+Waiting for db:9092 (58s of 60s)...
+db:9092 is not reachable after 60s - giving up.
+bookstore.service: Control process exited, code=exited, status=1/FAILURE
+bookstore.service: Failed with result 'exit-code'.
+Failed to start bookstore.service - Bookstore Spring Boot application (COGSI).
+502
+```
+
+With the database started again, the next attempt proceeds:
+
+```bash
+vagrant ssh db -c 'sudo systemctl start h2'
+vagrant ssh app -c 'sudo systemctl start bookstore; journalctl -u bookstore --no-pager -o cat | grep -E "Waiting|accepting" | tail -3'
+```
+
+```console
+Waiting for db:9092 (0s of 60s)...
+Waiting for db:9092 (2s of 60s)...
+db:9092 is accepting connections (after 4s).
+```
+
+> - `nc -z` only opens and closes a TCP connection: it checks exactly what
+>   the requirement asks, the availability of the H2 TCP port.
+> - `ExecStartPre` runs before `ExecStart`. If the check fails, systemd does
+>   not launch the JVM at all, instead of letting Spring Boot fail later with
+>   a connection error in the middle of its start-up.
+> - Because the check belongs to the unit, it applies to every start: during
+>   provisioning, after `vagrant reload` (the service is enabled at boot and
+>   the two machines boot independently) and on manual restarts.
+> - `Restart=on-failure` makes systemd try again after 10 seconds, so the
+>   application recovers by itself when the database comes back. The proxy
+>   answers 502 while the application is down.
+
+### 6.8. Reverse proxy
+
+> For a more realistic multi-tier environment, consider a third VM running
+> Nginx as a reverse proxy
+> - Instead of accessing your Spring Boot app directly, you will now route all
+>   traffic through a third VM (proxy)
+> - Use private networking between the proxy VM and the app VM to simulate
+>   internal infrastructure communication
+
+```nginx
+# /etc/nginx/sites-available/bookstore
+upstream bookstore {
+    server app:8080;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location / {
+        proxy_pass http://bookstore;
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+```ruby
+# only the proxy publishes an application port
+node.vm.network "forwarded_port",
+  guest: 80, host: proxy_host_port,
+  host_ip: "127.0.0.1", auto_correct: true
+```
+
+```console
+==> proxy: Running provisioner: proxy_setup (shell)...
+    proxy: [INSTALL] Installing: nginx
+    proxy: [CONFIG] /etc/nginx/sites-available/bookstore
+    proxy: [CONFIG] Site bookstore enabled.
+    proxy: [CONFIG] Default site disabled.
+    proxy: [CHECK] nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+    proxy: [CHECK] nginx: configuration file /etc/nginx/nginx.conf test is successful
+    proxy: [RELOAD] nginx - its configuration changed.
+    proxy: [INFO] GET http://127.0.0.1/actuator/health through the proxy -> HTTP 200
+```
+
+```bash
+# through the proxy, from the host
+curl -s http://localhost:8080/
+
+# directly to the application machine, from the host
+curl -s -m 6 -o /dev/null -w '%{http_code} %{errormsg}\n' http://192.168.56.21:8080/books
+```
+
+```console
+{"_links":{"books":{"href":"http://localhost:8080/books"},"clients":{"href":"http://localhost:8080/clients"},"orders":{"href":"http://localhost:8080/orders"},"health":{"href":"http://localhost:8080/health"},"info":{"href":"http://localhost:8080/info"}}}
+000 Connection timed out after 6001 milliseconds
+```
+
+> - The browser talks only to the proxy. `proxy_pass` forwards each request to
+>   `app:8080` over the private network, and the `app` and `db` machines have
+>   no application port forwarded to the host.
+> - `proxy_set_header Host $http_host` passes on the address the client used,
+>   including the port. The Bookstore builds the links of its responses from
+>   that header, so they point to `http://localhost:8080`, the proxy, and not
+>   to the internal `app:8080`, which the client cannot reach.
+> - The direct request to the application machine times out because its
+>   firewall accepts port 8080 only from the proxy. All traffic is therefore
+>   forced through the proxy, not merely expected to use it.
+> - The script validates the configuration with `nginx -t` and reloads Nginx
+>   only when the site file changed, which keeps the step idempotent and
+>   avoids dropping connections on a repeated provisioning.
+
+### 6.9. Repeating the provisioning and restarting the machines
+
+```bash
+vagrant provision
+```
+
+```console
+==> db: Running provisioner: ssh_key (shell)...
+    db: [OK] authorized_keys already contains only the custom key.
+==> db: Running provisioner: base_packages (shell)...
+    db: [OK] /etc/hosts already lists the machines.
+==> db: Running provisioner: db_setup (shell)...
+    db: [OK] openjdk-21-jre-headless is already installed.
+    db: [OK] /opt/h2/h2-2.4.240.jar is present and matches its checksum.
+    db: [OK] User h2 already exists.
+    db: [OK] /etc/systemd/system/h2.service is up to date.
+    db: [READY] H2 is listening on port 9092.
+==> app: Running provisioner: app_setup (shell)...
+    app: [OK] Repository already cloned in /home/vagrant/COGSI-2026-2027 - updating main.
+    app: [BUILD] CA1/part2: ./gradlew bootJar
+    app: > Task :bootJar UP-TO-DATE
+    app: BUILD SUCCESSFUL in 22s
+    app: [OK] /opt/bookstore/bookstore.jar is up to date.
+    app: [OK] /etc/bookstore/application.properties is up to date.
+    app: [OK] /etc/systemd/system/bookstore.service is up to date.
+==> proxy: Running provisioner: proxy_setup (shell)...
+    proxy: [OK] nginx is already installed.
+    proxy: [OK] /etc/nginx/sites-available/bookstore is up to date.
+    proxy: [OK] nginx is already running.
+    proxy: [INFO] GET http://127.0.0.1/actuator/health through the proxy -> HTTP 200
+```
+
+After `vagrant reload db app`, no provisioner runs and the services start by
+themselves, in the right order because of the health check:
+
+```console
+==> db: Machine already provisioned. Run `vagrant provision` or use the `--provision`
+==> app: Machine already provisioned. Run `vagrant provision` or use the `--provision`
+```
+
+```bash
+vagrant ssh app -c 'systemctl is-active bookstore; journalctl -u bookstore -b --no-pager -o cat | grep accepting'
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/actuator/health
+```
+
+```console
+active
+db:9092 is accepting connections (after 0s).
+200
+```
+
+> - The scripts follow the techniques of Part 1 (section 5.9): state is
+>   checked before each change and a service is restarted only when one of
+>   its files changed.
+> - Unlike Part 1, the services are enabled at boot (`systemctl enable`).
+>   There is no synced folder to wait for, and the dependency between the
+>   machines is handled by the health check instead of by the provisioning
+>   order.
+
+### 6.10. Development-oriented or CI/CD-oriented?
+
+> Reflect on whether your provisioning design is more development-oriented or
+> CI/CD-oriented
+
+The design is **development-oriented**, with several properties that a
+pipeline needs already in place.
+
+What makes it development-oriented:
+
+- **The application is built inside the machine that runs it.** `app.sh`
+  clones the repository and runs Gradle on the `app` machine, which therefore
+  carries a JDK, Git and the build caches. A pipeline builds the artifact
+  once, tests it, stores it with a version, and deploys that same artifact to
+  every environment; the servers only need a Java runtime.
+- **The machines are mutable.** The same VM is provisioned again and again and
+  converges to the desired state. A CI/CD flow favours immutable machines:
+  an image is built (for example with Packer) and running machines are
+  replaced instead of repaired.
+- **It targets a developer workstation.** Vagrant with VirtualBox, a
+  host-only network and a port forwarded to `localhost` describe a laptop,
+  not shared infrastructure.
+- **Secrets have development defaults.** The database password comes from the
+  environment but falls back to a known value, and it ends in a file on the
+  machine. A pipeline would inject it from a secrets manager and never accept
+  a default.
+- **The provisioning is imperative shell.** Idempotence had to be written by
+  hand in every script. A configuration management tool such as Ansible
+  provides it declaratively and scales to many machines.
+- **There is no automated verification stage.** The checks in this report
+  were run by hand. A pipeline would run them as tests after each deployment.
+
+What already serves a CI/CD use:
+
+- Everything is code under version control, and `vagrant up` needs no manual
+  step, no prompt and no interactive login.
+- Every script is idempotent, stops on the first error (`set -euo pipefail`)
+  and returns a non-zero exit code, so a pipeline can detect a failure.
+- The behaviour is controlled by environment variables, which is how a
+  pipeline parameterises a job.
+- Versions are pinned: the box, the Vagrant range, the Gradle Wrapper and the
+  H2 jar with its checksum.
+- Readiness is checked, not assumed: the provisioning waits for H2, for the
+  Bookstore health endpoint and for the proxy, and the service has its own
+  health check.
+- `vagrant validate` is a cheap check that a pipeline can run on every pull
+  request.
+
+To move towards CI/CD the main change would be to separate build from
+deployment: build and test the jar in the pipeline, publish it, and reduce
+`app.sh` to downloading a given version and configuring the service.
+
+### 6.11. Files committed and the Part 2 tag
+
+```bash
+git ls-files CA2/part2
+```
+
+```console
+CA2/part2/Vagrantfile
+CA2/part2/provisioning/app.sh
+CA2/part2/provisioning/base.sh
+CA2/part2/provisioning/db.sh
+CA2/part2/provisioning/proxy.sh
+CA2/part2/provisioning/ssh-key.sh
+```
+
+> - `part2/keys/` and `.vagrant/` are not committed. The Nginx site, the
+>   systemd units and the `application.properties` are generated by the
+>   scripts, so there are no separate configuration files to version.
+
+---
+
+## 7. References
 
 - Vagrant documentation: <https://developer.hashicorp.com/vagrant/docs>
 - Vagrant shell provisioner: <https://developer.hashicorp.com/vagrant/docs/provisioning/shell>
@@ -1257,3 +1997,9 @@ CA2/part1/provisioning/start.sh
 - systemd unit configuration: <https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html>
 - Lecture example repository (virtualization module):
   <https://github.com/lmpnogueira/cogsi/tree/main/virtualization>
+- H2 server mode and `org.h2.tools.Server`: <https://www.h2database.com/html/tutorial.html#using_server>
+- Vagrant multi-machine environments: <https://developer.hashicorp.com/vagrant/docs/multi-machine>
+- Vagrant SSH settings: <https://developer.hashicorp.com/vagrant/docs/vagrantfile/ssh_settings>
+- ufw manual: <https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html>
+- Nginx reverse proxy: <https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/>
+- systemd service units (`ExecStartPre`, `Restart`): <https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html>
