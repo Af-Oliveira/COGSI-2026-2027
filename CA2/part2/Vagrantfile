@@ -141,6 +141,20 @@ Vagrant.configure("2") do |config|
         path: "provisioning/base.sh",
         env: { "HOSTS_ENTRIES" => hosts_entries }
 
+      # -----------------------------------------------------------------------
+      # Machine-specific provisioning
+      # -----------------------------------------------------------------------
+      case name
+      when "db"
+        node.vm.provision "shell",
+          name: "db_setup",
+          path: "provisioning/db.sh",
+          env: {
+            "H2_PORT" => H2_PORT.to_s,
+            "DB_IP"   => machine[:ip],
+            "APP_IP"  => MACHINES["app"][:ip]
+          }
+      end
     end
   end
 
