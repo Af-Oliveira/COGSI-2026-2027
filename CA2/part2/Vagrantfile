@@ -1,0 +1,112 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# =============================================================================
+# Vagrantfile - COGSI CA2 / Part 2
+# -----------------------------------------------------------------------------
+# A three-tier environment for the Gradle version of the Bookstore:
+#
+#   host browser --8080--> proxy (Nginx) --8080--> app (Spring Boot) --9092--> db (H2)
+#
+#   Machine  Hostname  Private address   Role
+#   db       db        192.168.56.22     H2 database engine in server mode
+#   app      app       192.168.56.21     Bookstore Spring Boot application
+#   proxy    proxy     192.168.56.20     Nginx reverse proxy, the only entry point
+#
+# Directory structure:
+#   .
+#   ├── Vagrantfile
+#   ├── provisioning/
+#   │   ├── base.sh       common packages and /etc/hosts entries (all machines)
+#   │   ├── ssh-key.sh    replaces the Vagrant insecure key (all machines)
+#   │   ├── db.sh         H2 server and firewall
+#   │   ├── app.sh        clone, build and run the Bookstore
+#   │   └── proxy.sh      Nginx reverse proxy
+#   └── keys/             SSH key pairs generated per machine (not versioned)
+#
+# Host environment variables (all optional):
+#   DB_USER, DB_PASSWORD        H2 credentials used by the Bookstore
+#   REPO_URL, REPO_BRANCH       repository and branch cloned on the app machine
+#   GITHUB_TOKEN                access token, only for a private repository
+#   APP_MEMORY, APP_CPUS        resources of the app machine
+#   PROXY_HOST_PORT             host port forwarded to the proxy (default 8080)
+#
+# Useful commands:
+#   vagrant up                                   db, app and proxy, in this order
+#   vagrant provision app --provision-with app_setup
+#   vagrant ssh db
+# =============================================================================
+
+Vagrant.require_version ">= 2.4.0", "< 3.0.0"
+
+# -----------------------------------------------------------------------------
+# Host-driven configuration
+# -----------------------------------------------------------------------------
+db_user     = ENV["DB_USER"]     || "bookstore"
+db_password = ENV["DB_PASSWORD"] || "bookstore-dev"
+
+repo_url     = ENV["REPO_URL"]     || "https://github.com/Af-Oliveira/COGSI-2026-2027.git"
+repo_branch  = ENV["REPO_BRANCH"]  || "main"
+github_token = ENV["GITHUB_TOKEN"] || ""
+
+app_memory = ENV["APP_MEMORY"] || "2048"
+app_cpus   = ENV["APP_CPUS"]   || "2"
+
+proxy_host_port = (ENV["PROXY_HOST_PORT"] || "8080").to_i
+
+# -----------------------------------------------------------------------------
+# Topology
+# -----------------------------------------------------------------------------
+# The database gets the least CPU and memory because H2 serves a single small
+# client; the application needs enough memory for the Gradle build and the JVM.
+MACHINES = {
+  "db"    => { ip: "192.168.56.22", memory: "768",      cpus: "1" },
+  "app"   => { ip: "192.168.56.21", memory: app_memory, cpus: app_cpus },
+  "proxy" => { ip: "192.168.56.20", memory: "512",      cpus: "1" }
+}
+
+H2_PORT  = 9092
+APP_PORT = 8080
+
+# Lines appended to /etc/hosts of every machine, so they find each other by name.
+hosts_entries = MACHINES.map { |name, machine| "#{machine[:ip]} #{name}" }.join("\n")
+
+Vagrant.configure("2") do |config|
+
+  # ===========================================================================
+  # GLOBAL SETTINGS
+  # ===========================================================================
+  config.vm.box = "bento/ubuntu-24.04"
+  config.vm.box_version = "202510.26.0"
+  config.vm.box_check_update = false
+
+  # Nothing in the guests depends on the host project folder.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  MACHINES.each do |name, machine|
+    config.vm.define name, primary: name == "app" do |node|
+
+      node.vm.hostname = name
+      node.vm.network "private_network", ip: machine[:ip]
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = "cogsi-ca2-part2-#{name}"
+        vb.memory = machine[:memory]
+        vb.cpus = machine[:cpus]
+        vb.gui = false
+      end
+
+      node.vm.provider "vmware_desktop" do |vmware|
+        vmware.vmx["memsize"] = machine[:memory]
+        vmware.vmx["numvcpus"] = machine[:cpus]
+      end
+
+      node.vm.provision "shell",
+        name: "base_packages",
+        path: "provisioning/base.sh",
+        env: { "HOSTS_ENTRIES" => hosts_entries }
+
+    end
+  end
+
+end
