@@ -1,0 +1,95 @@
+#cloud-config
+# =============================================================================
+# cloud-init/db.yaml - COGSI CA2 / Alternative (Multipass + cloud-init)
+# -----------------------------------------------------------------------------
+# Declares the db instance: the H2 database engine in server mode, as its own
+# process, behind a closed firewall.
+#
+# Placeholders replaced by up.sh before the file is given to Multipass:
+#   @@PUBLIC_KEY@@   public half of the SSH key generated for this instance
+#   @@H2_PORT@@      TCP port of the H2 server
+#   @@H2_VERSION@@   H2 release, the same one the Bookstore build resolves
+#   @@H2_SHA1@@      checksum of that jar
+#   @@MAC@@, @@IP@@  MAC and static address of the private interface
+#   @@DB_IP@@, @@APP_IP@@, @@PROXY_IP@@   addresses written to /etc/hosts
+# =============================================================================
+
+# Multipass enables this option, which makes cloud-init rewrite /etc/hosts on
+# every boot and would drop the names added below.
+manage_etc_hosts: false
+
+# Custom SSH key of this instance, added to the default user (ubuntu).
+ssh_authorized_keys:
+  - @@PUBLIC_KEY@@
+
+package_update: true
+packages:
+  - openjdk-21-jre-headless
+  - netcat-openbsd
+  - curl
+  - ufw
+
+write_files:
+  # Static address on the interface bridged by Multipass (--network), matched
+  # by the MAC address that up.sh assigns to it. This is the private network
+  # of the three instances.
+  - path: /etc/netplan/60-cogsi-private.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          cogsi-private:
+            match:
+              macaddress: "@@MAC@@"
+            addresses: [@@IP@@/24]
+
+  - path: /etc/systemd/system/h2.service
+    content: |
+      # Managed by cloud-init (CA2/alternative/cloud-init/db.yaml).
+      [Unit]
+      Description=H2 database engine in server mode (COGSI)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=h2
+      WorkingDirectory=/var/lib/h2
+      # -tcp             start only the TCP server (no web console, no PG server)
+      # -tcpAllowOthers  accept connections from other machines, not only localhost
+      # -baseDir         every database lives under this directory
+      # -ifNotExists     let the first client connection create the database
+      ExecStart=/usr/bin/java -cp /opt/h2/h2-@@H2_VERSION@@.jar org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort @@H2_PORT@@ -baseDir /var/lib/h2 -ifNotExists
+      # The JVM exits with 143 when it is stopped with SIGTERM.
+      SuccessExitStatus=143
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Permissions are set here and not with "permissions:" in write_files:
+  # Multipass rewrites the YAML it receives and turns a quoted mode such as
+  # "0600" into a number, which cloud-init reports as a schema error.
+  - chmod 0600 /etc/netplan/60-cogsi-private.yaml
+  # Private network up, and the names of the three instances.
+  - netplan apply
+  - printf '%s\n' '# BEGIN cogsi-ca2' '@@DB_IP@@ db' '@@APP_IP@@ app' '@@PROXY_IP@@ proxy' '# END cogsi-ca2' >> /etc/hosts
+  # H2 engine, verified against its checksum before it is installed.
+  - install -d -m 0755 /opt/h2
+  - curl -fsSL -o /opt/h2/h2.download https://repo1.maven.org/maven2/com/h2database/h2/@@H2_VERSION@@/h2-@@H2_VERSION@@.jar
+  - echo "@@H2_SHA1@@  /opt/h2/h2.download" | sha1sum --check --status && mv /opt/h2/h2.download /opt/h2/h2-@@H2_VERSION@@.jar
+  # Service account and data directory.
+  - useradd --system --home-dir /var/lib/h2 --shell /usr/sbin/nologin h2
+  - install -d -m 0750 -o h2 -g h2 /var/lib/h2
+  # Closed firewall: SSH (Multipass manages the instance through it) and the
+  # H2 port, the latter only from the app instance.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow from @@APP_IP@@ to @@DB_IP@@ port @@H2_PORT@@ proto tcp
+  - ufw --force enable
+  - systemctl daemon-reload
+  - systemctl enable --now h2
+
+final_message: "db instance ready after $UPTIME seconds"

@@ -7,5 +7,7 @@
 part1/h2-data/*
 !part1/h2-data/.gitkeep
 
-# SSH key pairs generated for each Part 2 machine. Private keys are secrets.
+# SSH key pairs generated for each Part 2 machine and for each instance of the
+# alternative solution. Private keys are secrets.
 part2/keys/
+alternative/keys/

@@ -1,0 +1,144 @@
+#cloud-config
+# =============================================================================
+# cloud-init/app.yaml - COGSI CA2 / Alternative (Multipass + cloud-init)
+# -----------------------------------------------------------------------------
+# Declares the app instance: clone of the group repository, build with the
+# Gradle Wrapper and the Bookstore as a systemd service that waits for the H2
+# TCP port before it starts.
+#
+# Placeholders replaced by up.sh before the file is given to Multipass:
+#   @@PUBLIC_KEY@@                 public half of the SSH key of this instance
+#   @@REPO_URL@@, @@REPO_BRANCH@@  repository to clone
+#   @@DB_USER@@, @@DB_PASSWORD@@   H2 credentials (from the host environment)
+#   @@H2_PORT@@, @@APP_PORT@@      ports of the H2 server and of the Bookstore
+#   @@MAC@@, @@IP@@  MAC and static address of the private interface
+#   @@DB_IP@@, @@APP_IP@@, @@PROXY_IP@@   addresses written to /etc/hosts
+# =============================================================================
+
+# Multipass enables this option, which makes cloud-init rewrite /etc/hosts on
+# every boot and would drop the names added below.
+manage_etc_hosts: false
+
+# Custom SSH key of this instance, added to the default user (ubuntu).
+ssh_authorized_keys:
+  - @@PUBLIC_KEY@@
+
+package_update: true
+packages:
+  - git
+  - openjdk-21-jdk-headless
+  - netcat-openbsd
+  - curl
+  - ufw
+
+write_files:
+  # Static address on the interface bridged by Multipass (--network), matched
+  # by the MAC address that up.sh assigns to it. This is the private network
+  # of the three instances.
+  - path: /etc/netplan/60-cogsi-private.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          cogsi-private:
+            match:
+              macaddress: "@@MAC@@"
+            addresses: [@@IP@@/24]
+
+  # The file holds the database password: readable by root and by the group of
+  # the application user only (mode set in runcmd). "defer" writes it after
+  # that user exists.
+  - path: /etc/bookstore/application.properties
+    owner: root:ubuntu
+    defer: true
+    content: |
+      # Managed by cloud-init (CA2/alternative/cloud-init/app.yaml).
+
+      # H2 in server mode: the application is a JDBC client of the engine that
+      # runs on the db instance.
+      spring.datasource.url=jdbc:h2:tcp://db:@@H2_PORT@@/./bookstore
+      spring.datasource.driverClassName=org.h2.Driver
+      spring.datasource.username=@@DB_USER@@
+      spring.datasource.password=@@DB_PASSWORD@@
+
+      # Keep the existing schema and rows between executions.
+      spring.jpa.hibernate.ddl-auto=update
+
+      server.port=@@APP_PORT@@
+      spring.jpa.show-sql=false
+
+  - path: /usr/local/bin/wait-for-port
+    content: |
+      #!/bin/bash
+      # Managed by cloud-init (CA2/alternative/cloud-init/app.yaml).
+      #
+      # Usage: wait-for-port <host> <port> [timeout in seconds]
+      # Succeeds as soon as a TCP connection to host:port is accepted; fails
+      # when the timeout expires, so that the dependent service is not started.
+      set -u
+
+      host=${1:?host is required}
+      port=${2:?port is required}
+      timeout=${3:-60}
+
+      for ((elapsed = 0; elapsed < timeout; elapsed += 2)); do
+          if nc -z -w 2 "$host" "$port" 2>/dev/null; then
+              echo "$host:$port is accepting connections (after ${elapsed}s)."
+              exit 0
+          fi
+          echo "Waiting for $host:$port (${elapsed}s of ${timeout}s)..."
+          sleep 2
+      done
+
+      echo "$host:$port is not reachable after ${timeout}s - giving up." >&2
+      exit 1
+
+  - path: /etc/systemd/system/bookstore.service
+    content: |
+      # Managed by cloud-init (CA2/alternative/cloud-init/app.yaml).
+      [Unit]
+      Description=Bookstore Spring Boot application (COGSI)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=ubuntu
+      WorkingDirectory=/opt/bookstore
+      # Health check: the application is only launched once the H2 TCP port answers.
+      ExecStartPre=/usr/local/bin/wait-for-port db @@H2_PORT@@ 60
+      ExecStart=/usr/bin/java -jar /opt/bookstore/bookstore.jar --spring.config.additional-location=file:/etc/bookstore/
+      TimeoutStartSec=120
+      # The JVM exits with 143 when it is stopped with SIGTERM.
+      SuccessExitStatus=143
+      Restart=on-failure
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Permissions are set here and not with "permissions:" in write_files:
+  # Multipass rewrites the YAML it receives and turns a quoted mode such as
+  # "0600" into a number, which cloud-init reports as a schema error.
+  - chmod 0600 /etc/netplan/60-cogsi-private.yaml
+  # Private network up, and the names of the three instances.
+  - netplan apply
+  - printf '%s\n' '# BEGIN cogsi-ca2' '@@DB_IP@@ db' '@@APP_IP@@ app' '@@PROXY_IP@@ proxy' '# END cogsi-ca2' >> /etc/hosts
+  - chmod 0640 /etc/bookstore/application.properties
+  - chmod 0755 /usr/local/bin/wait-for-port
+  # Clone and build as the application user, never as root.
+  - sudo -u ubuntu -H git clone --quiet --branch "@@REPO_BRANCH@@" "@@REPO_URL@@" /home/ubuntu/COGSI-2026-2027
+  - cd /home/ubuntu/COGSI-2026-2027/CA1/part2 && sudo -u ubuntu -H ./gradlew --no-daemon --console=plain bootJar
+  - install -D -m 0644 "$(find /home/ubuntu/COGSI-2026-2027/CA1/part2/build/libs -maxdepth 1 -name 'bookstore-*.jar' ! -name '*-plain.jar' | sort | tail -n 1)" /opt/bookstore/bookstore.jar
+  # Closed firewall: SSH (Multipass manages the instance through it) and the
+  # Bookstore port, the latter only from the proxy instance.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow from @@PROXY_IP@@ to @@APP_IP@@ port @@APP_PORT@@ proto tcp
+  - ufw --force enable
+  # Enabled at boot and started now; the unit runs the health check first.
+  - systemctl daemon-reload
+  - systemctl enable --now bookstore
+
+final_message: "app instance ready after $UPTIME seconds"
