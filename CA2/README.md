@@ -128,6 +128,7 @@ COGSI-2026-2027/
     ├── assets/               (screenshots used in this report)
     │   ├── part1/            (Part 1 screenshots embedded below)
     │   ├── part2/            (Part 2 screenshots embedded below)
+    │   ├── alternative/      (screenshot of the alternative solution)
     │   └── AllScreenShots/   (every screenshot taken while testing both parts)
     ├── part1/
     │   ├── Vagrantfile
@@ -2465,6 +2466,12 @@ curl -s http://localhost:8080/books
 {"author":"Multipass","id":3,"price":9.0,"title":"Alternative"}
 [{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"},{"author":"Multipass","id":3,"price":9.0,"title":"Alternative"}]
 ```
+
+The same page rendered by a browser on the host, captured with headless
+Microsoft Edge while a tunnel was open (on port 8081 for this capture, because
+8080 was in use by another test):
+
+![Bookstore book list served by the Multipass instances, seen from a host browser](assets/alternative/bookstore-through-tunnel.png)
 
 ```bash
 # tunnel.sh (excerpt)
