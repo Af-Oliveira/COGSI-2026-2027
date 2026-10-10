@@ -26,7 +26,9 @@ the assignment.
 4. [Operative guidelines](#4-operative-guidelines)
 5. [Part 1 - First week](#5-part-1---first-week)
 6. [Part 2 - Second week](#6-part-2---second-week)
-7. [References](#7-references)
+7. [Alternative solution - analysis and design](#7-alternative-solution---analysis-and-design)
+8. [Alternative solution - implementation](#8-alternative-solution---implementation)
+9. [References](#9-references)
 
 ---
 
@@ -52,6 +54,10 @@ JDBC client of that server, and `proxy` runs Nginx as the only entry point.
 Each machine has its own SSH key, firewalls restrict who can talk to whom, and
 the application waits for the database port before it starts.
 
+The alternative solution creates the same three-tier environment without
+Vagrant: Multipass launches the virtual machines and cloud-init provisions
+them on their first boot.
+
 ---
 
 ## 2. Environment and prerequisites
@@ -64,6 +70,7 @@ The work was performed with the tools below.
 | VirtualBox | 7.2.20 | Provider: supplies the virtualization. |
 | Vagrant | 2.4.9 | Creates, provisions and manages the VM. |
 | Box | `bento/ubuntu-24.04` 202510.26.0 | Base image (Ubuntu 24.04.3 LTS, kernel 6.8.0-86). |
+| Multipass | 1.16.4 (VirtualBox driver) | Alternative solution: creates the VMs without Vagrant. |
 | Git / GitHub CLI | git 2.43 / gh 2.46 | Branches, tags, issues and pull requests. |
 
 On Windows, VirtualBox and Vagrant can be installed with `winget`:
@@ -116,7 +123,7 @@ COGSI-2026-2027/
 │   └── part2/                (Bookstore Spring Boot application, Gradle)
 └── CA2/
     ├── README.md             (this technical report)
-    ├── .gitignore            (.vagrant/ and the H2 database files)
+    ├── .gitignore            (.vagrant/, the H2 database files and the SSH keys)
     ├── .gitattributes        (LF line endings for files that run in the guest)
     ├── assets/               (screenshots used in this report)
     │   ├── part1/            (Part 1 screenshots embedded below)
@@ -131,14 +138,24 @@ COGSI-2026-2027/
     │   │   ├── deploy.sh     (artifacts, H2 configuration, systemd units)
     │   │   └── start.sh      (start the services, on every boot)
     │   └── h2-data/          (synced folder dedicated to the H2 database)
-    └── part2/
-        ├── Vagrantfile       (db, app and proxy machines)
-        ├── provisioning/
-        │   ├── base.sh       (common tools and /etc/hosts, all machines)
-        │   ├── ssh-key.sh    (custom SSH key, all machines)
-        │   ├── db.sh         (H2 server and firewall)
-        │   ├── app.sh        (Bookstore, health check and firewall)
-        │   └── proxy.sh      (Nginx reverse proxy)
+    ├── part2/
+    │   ├── Vagrantfile       (db, app and proxy machines)
+    │   ├── provisioning/
+    │   │   ├── base.sh       (common tools and /etc/hosts, all machines)
+    │   │   ├── ssh-key.sh    (custom SSH key, all machines)
+    │   │   ├── db.sh         (H2 server and firewall)
+    │   │   ├── app.sh        (Bookstore, health check and firewall)
+    │   │   └── proxy.sh      (Nginx reverse proxy)
+    │   └── keys/             (generated SSH keys, not versioned)
+    └── alternative/
+        ├── up.sh             (creates the instances that are missing)
+        ├── tunnel.sh         (publishes the proxy on a host port through SSH)
+        ├── down.sh           (deletes the instances)
+        ├── common.sh         (settings shared by the scripts)
+        ├── cloud-init/
+        │   ├── db.yaml       (H2 server and firewall)
+        │   ├── app.yaml      (Bookstore, health check and firewall)
+        │   └── proxy.yaml    (Nginx reverse proxy)
         └── keys/             (generated SSH keys, not versioned)
 ```
 
@@ -2006,7 +2023,599 @@ CA2/part2/provisioning/ssh-key.sh
 
 ---
 
-## 7. References
+## 7. Alternative solution - analysis and design
+
+> Present alternative technologies for creating and managing virtual machines
+> (i.e., not based on Vagrant)
+> - Analyze how the alternative solutions compare to your base solution
+> - Compare their VM and virtualization capabilities
+> - Describe how the alternative tools could be used (i.e., only the design of
+>   the solution) to solve the same goals as presented for this assignment
+
+### 7.1. What Vagrant does in the base solution
+
+Before comparing, it helps to separate the jobs Vagrant performed in Parts 1
+and 2, because no single alternative covers all of them in the same way:
+
+1. **Obtaining a base image**: a versioned box from a public catalogue.
+2. **Creating the VM** on a hypervisor, with CPU, memory and networks.
+3. **Describing several VMs** and their relations in one file.
+4. **Provisioning** the guest with scripts, with data passed from the host.
+5. **Day-to-day operation**: `up`, `halt`, `reload`, `ssh`, `provision`,
+   `destroy`, synced folders and forwarded ports.
+
+Three alternatives that manage real virtual machines were analysed. All three
+delegate the provisioning (job 4) to **cloud-init**, the first-boot
+configuration system that the Ubuntu cloud images already include.
+
+| Alternative | What it is |
+| --- | --- |
+| **Multipass + cloud-init** | A command-line tool from Canonical that launches Ubuntu VMs on the hypervisor of the host with one command per instance. |
+| **Terraform or OpenTofu + cloud-init** | A declarative infrastructure-as-code tool. A *provider* plugin talks to the platform that runs the VMs (a cloud, Proxmox, vSphere, or libvirt on a Linux host). OpenTofu is the open-source fork with the same language. |
+| **libvirt (`virt-install`, `virsh`) + cloud-init** | The native virtualization management layer of Linux, driving KVM/QEMU directly. |
+
+Packer was also considered. It builds machine images (including Vagrant boxes)
+and does not run or manage VMs, so it complements any of these tools instead
+of replacing Vagrant; it is referred to in the reflection of section 6.10.
+
+### 7.2. Comparison of capabilities
+
+| Capability | Vagrant (base solution) | Multipass + cloud-init | Terraform / OpenTofu + cloud-init | libvirt + cloud-init |
+| --- | --- | --- | --- | --- |
+| Hypervisors or platforms | VirtualBox, VMware, Hyper-V, libvirt and others through provider plugins | One driver per host: QEMU or LXD on Linux, QEMU or VirtualBox on macOS, Hyper-V or VirtualBox on Windows | Whatever has a provider: public clouds, Proxmox, vSphere, libvirt | KVM/QEMU (and other Linux hypervisors) |
+| Host platforms | Windows, macOS, Linux | Windows, macOS, Linux | Windows, macOS, Linux for the tool; the VMs run where the provider points | Linux |
+| Base images | Boxes of any operating system, versioned in a public catalogue; the version can be pinned | Ubuntu cloud images only, selected by release (`24.04`), which follows the current build; a specific build needs an image hash or a custom image URL | Any image the platform accepts, referenced by URL, file or identifier | Any disk image or installer; cloud images for cloud-init |
+| Definition style | One Ruby file, declarative for the VMs, imperative inside the provisioners | Imperative: one `multipass launch` per instance; a script is needed to describe an environment | Declarative, with a state file and a plan step that shows the changes before applying them | Imperative commands, or declarative XML per VM and per network |
+| Provisioning | Shell, Ansible, Puppet, Chef and others; can be run again with `vagrant provision` | cloud-init, on the first boot only | cloud-init through the provider; provisioners exist but the documentation treats them as a last resort | cloud-init through `virt-install --cloud-init`, on the first boot only |
+| Networking | NAT, forwarded ports, private (host-only) networks with fixed addresses, public (bridged) networks | A default network managed by the driver, plus optional bridged interfaces (`--network`); no forwarded ports; no fixed addresses without configuring the guest | Networks are resources of the provider, with fixed addresses where the platform supports them | Virtual networks defined in XML (NAT, isolated, bridged), with fixed DHCP leases |
+| Shared folders | Synced folders (VirtualBox shared folders, rsync, NFS, SMB) declared in the file | `multipass mount` and `multipass transfer`, issued after the launch | Depends on the provider; normally none, data arrives through images or cloud-init | virtiofs or 9p shares declared per VM |
+| Multi-machine | Native: several `config.vm.define` in one file, ordered | No concept of environment: instances are independent | Native: resources, loops and dependencies between them | No concept of environment; one definition per VM |
+| Snapshots | Provided by the provider (`vagrant snapshot`) | `multipass snapshot` and `multipass restore`, on a stopped instance | Not a Terraform concept; the platform may offer it | `virsh snapshot-create-as` and `virsh snapshot-revert` |
+| SSH access and keys | `vagrant ssh`; an insecure key replaced on the first boot, or custom keys set in the file | `multipass shell` and `multipass exec` with a key owned by the Multipass service; user keys are added with cloud-init | Keys are injected with cloud-init or by the platform; plain `ssh` is used | Keys are injected with cloud-init; plain `ssh` or `virsh console` |
+| Lifecycle of a change | Edit the file, then `vagrant provision` or `vagrant reload` | Delete and launch again | `plan` shows the difference; changed VMs are replaced | Edit the definition, or delete and create again |
+
+How they compare with the base solution, in terms of the infrastructure-as-code
+principles:
+
+- **Declarative or imperative.** Terraform is the only fully declarative tool
+  of the four: the files describe the desired end state and the tool computes
+  the steps. Vagrant is declarative about the machines and imperative inside
+  the shell provisioners, which is why the idempotence of Parts 1 and 2 had to
+  be written by hand. Multipass and `virt-install` are imperative commands;
+  the declarative part of those solutions is the cloud-init file.
+- **Mutable or immutable.** Vagrant encourages repairing a running VM with
+  `vagrant provision`. cloud-init runs once, on the first boot, so the three
+  alternatives lead to the immutable approach: a change is applied by
+  replacing the machine. Idempotence stops being a property of the scripts
+  and becomes a property of the workflow.
+- **Scope.** Vagrant and Multipass target a workstation. Terraform targets
+  shared or production infrastructure and keeps a state that a team can share.
+  libvirt targets a Linux virtualization host.
+- **Portability of the definition.** A `Vagrantfile` is tied to Vagrant, but
+  the same file works on several providers. A cloud-init file is understood
+  by every cloud and by all three alternatives, so the provisioning written
+  for one of them is reused by the others.
+- **Reproducibility of the base image.** Vagrant pins a box version. Multipass
+  follows, by default, the current build of an Ubuntu release, so two launches
+  months apart start from different images.
+
+### 7.3. Design of the assignment with each alternative
+
+The table maps every concept used in Parts 1 and 2 to its equivalent. Goals
+that an alternative cannot meet directly are marked with the workaround.
+
+| Goal in this assignment | Vagrant (base solution) | Multipass + cloud-init | Terraform / OpenTofu (libvirt provider) | libvirt (`virt-install`) |
+| --- | --- | --- | --- | --- |
+| Create a VM from a trusted, fixed base | `config.vm.box` and `box_version` | `multipass launch 24.04`; image from Canonical, verified by Multipass, current build of the release | A volume resource created from the URL of a dated cloud image | `virt-install --import` with a downloaded, dated cloud image |
+| CPU, memory and disk | `vb.cpus`, `vb.memory` | `--cpus`, `--memory`, `--disk` | Arguments of the domain and volume resources | `--vcpus`, `--memory`, `--disk size=` |
+| Install the dependencies | Shell provisioner | `packages:` in cloud-init | Same cloud-init file, passed as user data | Same cloud-init file, `--cloud-init user-data=` |
+| Clone and build the applications | Shell provisioner | `runcmd:` in cloud-init | Same cloud-init file | Same cloud-init file |
+| Control the steps from the host | Environment variables read by the `Vagrantfile` | Environment variables read by a wrapper script that fills the cloud-init file | Input variables (`-var`, `TF_VAR_...`) and `templatefile()` | Environment variables in a wrapper script |
+| Use the Bookstore from the host browser | Forwarded port | No forwarded ports: browse to the address of the instance, or open an SSH tunnel when the driver does not give the host an address | Address of the VM on the libvirt network | Address of the VM on the libvirt network |
+| Chat server in the VM, clients on the host | Forwarded port 59001 | Same as above, to port 59001 | Same as above | Same as above |
+| Persist H2 outside the VM (Part 1) | Dedicated synced folder | `multipass mount <host-folder> <instance>:/h2-data` after the launch | A second volume resource that is not destroyed with the VM | A second disk, or a virtiofs share |
+| Several VMs in one definition | `config.vm.define` in a loop | A script that loops over the roles | One resource with `for_each` | A script that loops over the roles |
+| Private network with fixed addresses | `private_network, ip:` | No direct support: a bridged interface with a static address written by cloud-init (netplan) | A network resource plus a fixed address per interface | An isolated network in XML with fixed DHCP leases |
+| H2 in server mode on `db` | `db.sh` | `write_files:` (systemd unit) and `runcmd:` | Same cloud-init file | Same cloud-init file |
+| Custom SSH key per VM | `private_key_path` and a provisioner that rewrites `authorized_keys` | `ssh_authorized_keys:` in cloud-init; the Multipass service key remains, because `multipass exec` depends on it | `ssh_authorized_keys:` in cloud-init; no default key exists | `ssh_authorized_keys:` in cloud-init; no default key exists |
+| Health check of the H2 port | `ExecStartPre` in the unit written by `app.sh` | The same unit, written by `write_files:` | Same cloud-init file | Same cloud-init file |
+| Firewall on `db` | `ufw` commands in `db.sh` | `ufw` commands in `runcmd:` | Same cloud-init file, or a network filter of the platform | Same cloud-init file, or a libvirt network filter |
+| Reverse proxy | Third machine and `proxy.sh` | Third instance and its cloud-init file | Third resource | Third VM |
+| Repeat without side effects | Idempotent scripts, `vagrant provision` | The script skips what exists; changes are applied by replacing the instance | `terraform apply` is idempotent by design | Checks in the wrapper script |
+| Remove everything | `vagrant destroy` | `multipass delete --purge` | `terraform destroy` | `virsh undefine --remove-all-storage` |
+
+Design notes for each alternative:
+
+- **Multipass + cloud-init.** One cloud-init file per role replaces each
+  provisioning script, and a short shell script replaces the `Vagrantfile`: it
+  generates the keys, fills the placeholders of the cloud-init files and
+  calls `multipass launch` once per role, in the order `db`, `app`, `proxy`.
+  The weak points are the network (no fixed private addresses and no forwarded
+  ports) and the base image, which follows the current build. This is the
+  design implemented in [section 8](#8-alternative-solution---implementation).
+- **Terraform or OpenTofu.** The three machines become one `for_each` resource
+  over a map of roles, similar to the `MACHINES` table of the `Vagrantfile`.
+  The network is its own resource with an address range, each machine
+  receives a fixed address, and the cloud-init files are rendered with
+  `templatefile()` from input variables. `terraform plan` would show, before
+  any change, which machines would be replaced. On the group's Windows host
+  this design cannot run locally, because the libvirt provider needs a Linux
+  host with KVM; it would target a remote Linux server or a cloud.
+- **libvirt.** A script creates an isolated network from an XML definition
+  with one fixed lease per MAC address, then runs `virt-install --import
+  --cloud-init user-data=<role>.yaml` for each role. It gives the most control
+  over the virtual hardware and the networks, with the most manual work, and
+  it also requires a Linux host.
+
+Multipass was chosen for the implementation because it is the only one of the
+three that runs on the group's host (Windows 11 Home, where Hyper-V Manager
+is not available and KVM does not exist) and because its cloud-init files are
+the part that the other two alternatives would reuse unchanged.
+
+---
+
+## 8. Alternative solution - implementation
+
+> To achieve the requirements for the highest grade, implement one of the
+> alternative designs
+
+The Part 2 environment (`db`, `app` and `proxy`) was implemented again with
+Multipass and cloud-init, in `CA2/alternative/`. Vagrant is not used.
+
+```text
+host --SSH tunnel (8080)--> ca2-proxy (Nginx) --8080--> ca2-app (Spring Boot) --9092--> ca2-db (H2)
+                            192.168.57.20              192.168.57.21                  192.168.57.22
+```
+
+| Part 2 with Vagrant | Alternative |
+| --- | --- |
+| `Vagrantfile` | `up.sh`, `down.sh`, `common.sh` |
+| `provisioning/base.sh`, `ssh-key.sh`, `db.sh` | `cloud-init/db.yaml` |
+| `provisioning/base.sh`, `ssh-key.sh`, `app.sh` | `cloud-init/app.yaml` |
+| `provisioning/base.sh`, `ssh-key.sh`, `proxy.sh` | `cloud-init/proxy.yaml` |
+| Forwarded port of the proxy | `tunnel.sh` |
+
+### 8.1. Prerequisites
+
+```bash
+# install Multipass (Windows)
+winget install --id Canonical.Multipass -e
+
+# the version, the driver in use and the host networks that can be bridged
+multipass version
+multipass get local.driver
+multipass networks
+```
+
+```console
+multipass   1.16.4+win
+multipassd  1.16.4+win
+virtualbox
+Name    Type   Description
+Wi-Fi   wifi   Intel(R) Dual Band Wireless-AC 8265
+```
+
+> - Multipass has a client (`multipass`) and a service (`multipassd`) that
+>   owns the virtual machines.
+> - `multipass get local.driver` shows the hypervisor in use. Windows 11 Home
+>   has no Hyper-V management, so Multipass uses VirtualBox. The instances
+>   belong to the service account: they do not appear in the VirtualBox window
+>   of the user or in `VBoxManage list vms`.
+> - `multipass networks` lists the host networks an instance can be attached
+>   to with `--network`. Its name is the value of the `BRIDGE` variable of the
+>   scripts (default `Wi-Fi`).
+> - The scripts are Bash. On Windows they run in WSL, where the client is
+>   `multipass.exe`; `common.sh` finds it.
+
+### 8.2. Creating the environment
+
+```bash
+cd COGSI-2026-2027/CA2/alternative
+APP_CPUS=1 ./up.sh
+```
+
+```console
+Creating the Bookstore environment with Multipass
+[OK] Key pair of db already exists.
+[LAUNCH] ca2-db: 1 CPU, 768M memory, 5G disk, 192.168.57.22
+[READY] ca2-db provisioned by cloud-init without errors.
+[OK] Key pair of app already exists.
+[LAUNCH] ca2-app: 1 CPU, 2G memory, 8G disk, 192.168.57.21
+[READY] ca2-app provisioned by cloud-init without errors.
+[OK] Key pair of proxy already exists.
+[LAUNCH] ca2-proxy: 1 CPU, 512M memory, 4G disk, 192.168.57.20
+[READY] ca2-proxy provisioned by cloud-init without errors.
+Name                    State             IPv4             Image
+ca2-app                 Running           192.168.57.21    Ubuntu 24.04 LTS
+ca2-db                  Running           192.168.57.22    Ubuntu 24.04 LTS
+ca2-proxy               Running           192.168.57.20    Ubuntu 24.04 LTS
+[INFO] Waiting for the Bookstore to answer through the proxy...
+[READY] GET http://proxy/actuator/health -> HTTP 200 (after 0s)
+Environment ready. Run ./tunnel.sh and open http://localhost:8080/
+
+real    14m18.225s
+```
+
+The script has one loop over the roles. For each role it generates the key
+pair if it is missing, and launches the instance if it does not exist:
+
+```bash
+# up.sh (excerpt)
+render "$role" | "$MULTIPASS" launch "$IMAGE" \
+    --name "$name" \
+    --cpus "${CPUS[$role]}" --memory "${MEMORY[$role]}" --disk "${DISK[$role]}" \
+    --network "name=$BRIDGE,mode=manual,mac=${MAC[$role]}" \
+    --timeout "$LAUNCH_TIMEOUT" \
+    --cloud-init - >/dev/null
+```
+
+> - `multipass launch 24.04` creates an instance from the Ubuntu 24.04 cloud
+>   image, which Multipass downloads from Canonical and verifies.
+> - `--cpus`, `--memory` and `--disk` set the resources, the equivalent of the
+>   provider block of the `Vagrantfile`. The values are in `common.sh`: 768 MB
+>   for `db`, 2 GB for `app`, 512 MB for `proxy`.
+> - `--network name=...,mode=manual,mac=...` adds a second network interface,
+>   bridged to a host network, with a fixed MAC address. `mode=manual` tells
+>   Multipass not to configure it; cloud-init does that (section 8.3).
+> - `--cloud-init -` reads the cloud-init definition from standard input.
+>   `render` prints the file of the role with its `@@NAME@@` placeholders
+>   replaced by the values from the host environment (repository, branch,
+>   database credentials, addresses, public key).
+> - `--timeout` is raised because `multipass launch` waits for cloud-init to
+>   finish, and the `app` instance builds the Bookstore during that time.
+> - After each launch the script runs `cloud-init status --long` inside the
+>   instance and stops if cloud-init reported an error.
+> - `APP_CPUS=1` is used for the reason given in section 5.10.
+
+The same host environment variables of Part 2 control the result (`DB_USER`,
+`DB_PASSWORD`, `REPO_URL`, `REPO_BRANCH`, `APP_MEMORY`, `APP_CPUS`), plus
+`IMAGE`, `BRIDGE`, `SUBNET` and `NAME_PREFIX`. They are documented at the top
+of `common.sh`.
+
+### 8.3. Provisioning with cloud-init
+
+Each file in `cloud-init/` is a declarative description of one instance. The
+`db` instance, abridged:
+
+```yaml
+#cloud-config
+manage_etc_hosts: false
+
+ssh_authorized_keys:
+  - @@PUBLIC_KEY@@
+
+package_update: true
+packages:
+  - openjdk-21-jre-headless
+  - netcat-openbsd
+  - curl
+  - ufw
+
+write_files:
+  - path: /etc/netplan/60-cogsi-private.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          cogsi-private:
+            match:
+              macaddress: "@@MAC@@"
+            addresses: [@@IP@@/24]
+
+  - path: /etc/systemd/system/h2.service
+    content: |
+      [Service]
+      User=h2
+      ExecStart=/usr/bin/java -cp /opt/h2/h2-@@H2_VERSION@@.jar org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort @@H2_PORT@@ -baseDir /var/lib/h2 -ifNotExists
+      ...
+
+runcmd:
+  - chmod 0600 /etc/netplan/60-cogsi-private.yaml
+  - netplan apply
+  - printf '%s\n' '# BEGIN cogsi-ca2' '@@DB_IP@@ db' '@@APP_IP@@ app' '@@PROXY_IP@@ proxy' '# END cogsi-ca2' >> /etc/hosts
+  - curl -fsSL -o /opt/h2/h2.download https://repo1.maven.org/maven2/com/h2database/h2/@@H2_VERSION@@/h2-@@H2_VERSION@@.jar
+  - echo "@@H2_SHA1@@  /opt/h2/h2.download" | sha1sum --check --status && mv /opt/h2/h2.download /opt/h2/h2-@@H2_VERSION@@.jar
+  - useradd --system --home-dir /var/lib/h2 --shell /usr/sbin/nologin h2
+  - install -d -m 0750 -o h2 -g h2 /var/lib/h2
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow from @@APP_IP@@ to @@DB_IP@@ port @@H2_PORT@@ proto tcp
+  - ufw --force enable
+  - systemctl daemon-reload
+  - systemctl enable --now h2
+```
+
+> - `packages:` replaces the `apt-get install` blocks of the shell scripts.
+>   cloud-init installs what is missing; no `dpkg -s` check is needed.
+> - `write_files:` replaces the here-documents that wrote the systemd units,
+>   the Nginx site, the health check script and `application.properties`.
+> - `ssh_authorized_keys:` adds the key generated for the instance to the
+>   default user, `ubuntu`. It replaces `ssh-key.sh`.
+> - `runcmd:` holds the commands that have no declarative module: the
+>   download of the H2 jar with its checksum, the service account, the `ufw`
+>   rules and the start of the service. They run once, on the first boot.
+> - `manage_etc_hosts: false` is required because Multipass turns that option
+>   on, and cloud-init would then rewrite `/etc/hosts` on every boot and drop
+>   the names of the instances.
+> - The netplan file gives the second interface its static address. It is
+>   matched by MAC address, because the interface name is not known in
+>   advance. This is the equivalent of `private_network, ip:`.
+> - `app.yaml` has the same structure: it clones the repository and runs
+>   `./gradlew bootJar` as the `ubuntu` user, writes the same
+>   `wait-for-port` script and the same `bookstore.service` with
+>   `ExecStartPre=/usr/local/bin/wait-for-port db 9092 60`, and allows port
+>   8080 only from the proxy. `proxy.yaml` writes the same Nginx site.
+
+### 8.4. Verifying the environment
+
+```bash
+# resources and addresses of each instance
+multipass exec ca2-db -- bash -c 'nproc; free -m | sed -n 2p; ip -4 -br addr'
+
+# names, H2 server and firewall
+multipass exec ca2-app -- sed -n '/BEGIN cogsi/,/END cogsi/p' /etc/hosts
+multipass exec ca2-db -- bash -c 'systemctl status h2 --no-pager | sed -n 1,3p; ss -ltnH | grep 9092; sudo ls -l /var/lib/h2; sudo ufw status verbose'
+
+# who can reach the database
+multipass exec ca2-app -- nc -zv -w 3 db 9092
+multipass exec ca2-proxy -- nc -zv -w 3 db 9092
+
+# the datasource of the Bookstore
+multipass exec ca2-app -- bash -c 'sudo grep datasource.url /etc/bookstore/application.properties; ls -l /etc/bookstore/application.properties'
+```
+
+```console
+1
+Mem:             690 ...
+enp0s3           UP             10.0.2.15/24 metric 100
+enp0s8           UP             192.168.57.22/24
+
+# BEGIN cogsi-ca2
+192.168.57.22 db
+192.168.57.21 app
+192.168.57.20 proxy
+# END cogsi-ca2
+
+● h2.service - H2 database engine in server mode (COGSI)
+     Loaded: loaded (/etc/systemd/system/h2.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-10-10 17:47:53 WEST; 11min ago
+LISTEN 0      50                 *:9092       *:*
+-rw-r--r-- 1 h2 h2 53248 Oct 10 17:56 bookstore.mv.db
+Status: active
+Default: deny (incoming), allow (outgoing), disabled (routed)
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW IN    Anywhere
+192.168.57.22 9092/tcp     ALLOW IN    192.168.57.21
+22/tcp (v6)                ALLOW IN    Anywhere (v6)
+
+Connection to db (192.168.57.22) 9092 port [tcp/*] succeeded!
+nc: connect to db (192.168.57.22) port 9092 (tcp) timed out: Operation now in progress
+
+spring.datasource.url=jdbc:h2:tcp://db:9092/./bookstore
+-rw-r----- 1 root ubuntu 484 Oct 10 17:51 /etc/bookstore/application.properties
+```
+
+> - `multipass exec <instance> -- <command>` runs a command in an instance,
+>   like `vagrant ssh <machine> -c`.
+> - `enp0s3` is the interface Multipass manages, behind NAT. Every instance
+>   has the same address there (10.0.2.15) and cannot reach the others
+>   through it. `enp0s8` is the private network created by cloud-init.
+> - The results match Part 2: H2 runs as its own process on port 9092, the
+>   firewall accepts that port only from `app`, the proxy is refused, and the
+>   Bookstore connects through JDBC to `db`.
+
+The health check behaves as in Part 2:
+
+```bash
+multipass exec ca2-db -- sudo systemctl stop h2
+multipass exec ca2-app -- bash -c 'sudo systemctl restart bookstore; journalctl -u bookstore --no-pager -o cat -n 5'
+```
+
+```console
+Job for bookstore.service failed because the control process exited with error code.
+Waiting for db:9092 (58s of 60s)...
+db:9092 is not reachable after 60s - giving up.
+bookstore.service: Control process exited, code=exited, status=1/FAILURE
+bookstore.service: Failed with result 'exit-code'.
+Failed to start bookstore.service - Bookstore Spring Boot application (COGSI).
+```
+
+After `sudo systemctl start h2` on `ca2-db` and `sudo systemctl start
+bookstore` on `ca2-app`, the journal shows `db:9092 is accepting connections
+(after 0s).` and the application answers again.
+
+### 8.5. Using the Bookstore from the host
+
+Multipass has no forwarded ports, and with the VirtualBox driver the host has
+no address in the network of the instances. `tunnel.sh` publishes the proxy
+on a host port with an SSH local forward, authenticated with the custom key of
+the proxy:
+
+```bash
+# terminal 1: keep the tunnel open
+./tunnel.sh
+
+# terminal 2 (or the browser): http://localhost:8080/
+curl -s http://localhost:8080/
+curl -s -X POST http://localhost:8080/books -H "Content-Type: application/json" -d '{"title":"Alternative","author":"Multipass","price":9}'
+curl -s http://localhost:8080/books
+```
+
+```console
+[INFO] Forwarding http://localhost:8080 -> proxy:80 through fe80::5054:ff:fec0:5120%4
+[INFO] Press Ctrl+C to close the tunnel.
+
+{"_links":{"books":{"href":"http://localhost:8080/books"},"clients":{"href":"http://localhost:8080/clients"},"orders":{"href":"http://localhost:8080/orders"},"health":{"href":"http://localhost:8080/health"},"info":{"href":"http://localhost:8080/info"}}}
+{"author":"Multipass","id":3,"price":9.0,"title":"Alternative"}
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"},{"author":"Multipass","id":3,"price":9.0,"title":"Alternative"}]
+```
+
+```bash
+# tunnel.sh (excerpt)
+exec "$ssh_client" -N \
+    -i "keys/proxy_ed25519" \
+    -o IdentitiesOnly=yes \
+    -L "127.0.0.1:$TUNNEL_PORT:127.0.0.1:80" \
+    "ubuntu@${address}%${scope}"
+```
+
+> - `ssh -N -L 127.0.0.1:8080:127.0.0.1:80` opens port 8080 on the host and
+>   forwards each connection to port 80 of the proxy, without running a
+>   remote command. It is bound to the loopback address, like the forwarded
+>   port of Part 2.
+> - The host has no IPv4 address in 192.168.57.0/24, and adding one requires
+>   administrator rights. The script uses the IPv6 link-local address of the
+>   proxy instead (`fe80::...`), which every interface has and which the host
+>   reaches through the bridged network with no configuration. `%4` is the
+>   index of the host interface, required with link-local addresses.
+> - The links returned by the API point to `http://localhost:8080`, because
+>   Nginx passes on the `Host` header, as in section 6.8.
+
+The custom keys were tested through the same path. Each instance accepts its
+own key and refuses the key of another instance:
+
+```bash
+ssh -i keys/db_ed25519  -o IdentitiesOnly=yes -o BatchMode=yes 'ubuntu@fe80::5054:ff:fec0:5122%4' hostname
+ssh -i keys/app_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes 'ubuntu@fe80::5054:ff:fec0:5122%4' hostname
+multipass exec ca2-app -- bash -c 'cut -d" " -f1,3 ~/.ssh/authorized_keys'
+```
+
+```console
+ca2-db
+ubuntu@fe80::5054:ff:fec0:5122%4: Permission denied (publickey).
+ssh-rsa ubuntu@localhost
+ssh-ed25519 cogsi-ca2-alt-app
+```
+
+> - `authorized_keys` has two entries: the custom key and the key of the
+>   Multipass service. The second one cannot be removed, because
+>   `multipass exec` and `multipass shell` depend on it. Its private half is
+>   readable only by the service account, and it is generated on each host,
+>   so it is not a publicly known key like the Vagrant insecure key.
+
+### 8.6. Repeating, replacing and removing
+
+```bash
+# a second execution
+./up.sh
+
+# replace only the application instance; the database stays
+./down.sh app
+./up.sh
+curl -s http://localhost:8080/books
+
+# remove everything
+./down.sh
+```
+
+```console
+[OK] Key pair of db already exists.
+[OK] Instance ca2-db already exists and is running.
+[OK] Key pair of app already exists.
+[OK] Instance ca2-app already exists and is running.
+[OK] Key pair of proxy already exists.
+[OK] Instance ca2-proxy already exists and is running.
+[READY] GET http://proxy/actuator/health -> HTTP 200 (after 0s)
+
+real    0m6.473s
+
+[DELETE] Instance ca2-app deleted.
+[OK] Instance ca2-db already exists and is running.
+[LAUNCH] ca2-app: 1 CPU, 2G memory, 8G disk, 192.168.57.21
+[READY] ca2-app provisioned by cloud-init without errors.
+[OK] Instance ca2-proxy already exists and is running.
+[READY] GET http://proxy/actuator/health -> HTTP 200 (after 20s)
+
+real    7m6.350s
+
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"},{"author":"Multipass","id":3,"price":9.0,"title":"Alternative"}, ...]
+```
+
+> - A second `./up.sh` changes nothing: existing keys and instances are
+>   skipped, and a stopped instance is started.
+> - cloud-init does not run again on an existing instance. A change to a
+>   cloud-init file is applied by replacing the instance, as shown with
+>   `app`. The book created in section 8.5 is still listed afterwards because
+>   the data lives in `ca2-db`. The list is abridged: the Bookstore inserts
+>   its two sample books again on every start, as in Parts 1 and 2.
+> - `multipass delete --purge` removes the instance and its disk. Without
+>   `--purge` the instance goes to a recycle bin and can be recovered.
+
+### 8.7. Limitations found on the group's host
+
+- **No private network between instances with the VirtualBox driver.** Each
+  instance is alone behind its own NAT and `multipass list` shows no address.
+  A bridged interface was added to every instance, but DHCP did not work over
+  the Wi-Fi bridge, so the addresses are static and set by cloud-init. On a
+  host where Multipass uses Hyper-V or QEMU the instances share a network and
+  receive addresses, and this part would not be necessary.
+- **The private network is not isolated from the physical network.** The
+  second interface is bridged to the Wi-Fi adapter, while the Vagrant
+  host-only network exists only inside the host. The `ufw` rules on `db` and
+  `app` are what restricts access here.
+- **No forwarded ports**, hence the SSH tunnel.
+- **The image build is not pinned.** `24.04` resolved to the build of
+  2026-09-26 at the time of this report (`multipass find`); a later launch
+  can receive a newer one. `multipass launch` also accepts a partial image
+  hash or a custom image URL, which was not tested here.
+- **Multipass rewrites the cloud-init file before passing it on.** A quoted
+  file mode such as `permissions: "0600"` reached the instance as a number,
+  and cloud-init reported a schema error (`extended_status: degraded`). The
+  modes are therefore set with `chmod` in `runcmd`.
+- **The Multipass SSH key cannot be removed** from the instances.
+- **No synced folder was used.** `multipass mount` exists, and would be the
+  equivalent of the Part 1 folder for the H2 files; the alternative
+  implements the Part 2 architecture, where the database lives on the disk
+  of `db`.
+
+### 8.8. Reflection on the differences
+
+| Aspect | Vagrant (Part 2) | Multipass + cloud-init |
+| --- | --- | --- |
+| Time for the whole environment on this host | About 11 minutes | About 14 minutes |
+| Lines written | One `Vagrantfile` and five shell scripts | Three cloud-init files and four short scripts |
+| Description of the environment | In one file, read by the tool | Spread over a script that the group had to write |
+| Provisioning model | Imperative scripts made idempotent by hand, repeatable on a live machine | Mostly declarative, runs once; changes replace the instance |
+| Feedback while provisioning | Every line of every script is shown live | Nothing until the launch ends; the log is `/var/log/cloud-init-output.log` in the instance |
+| Error handling | A failing script stops `vagrant up` | A failing `runcmd` line does not stop the others; the status must be checked afterwards |
+| Private network and fixed addresses | One line per machine | Manual: bridged interface, MAC address and netplan |
+| Host access | Forwarded port | SSH tunnel |
+| Base image | Pinned box version | Current build of the release |
+| SSH keys | Fully replaceable | Custom key added next to the service key |
+| Portability of the provisioning | Tied to Vagrant | cloud-init files reusable on any cloud or with Terraform and libvirt |
+
+What the group takes from implementing both:
+
+- **Vagrant is the better tool for this assignment.** A multi-machine
+  environment with a private network, fixed addresses and a forwarded port is
+  exactly what it was designed for, and each of those was one line. With
+  Multipass the same three features took most of the effort and depend on the
+  driver of the host.
+- **cloud-init is the better way to write the provisioning.** Packages,
+  files, users and keys are declared, not scripted. The files are shorter
+  than the shell scripts and none of the idempotence checks of Part 2
+  (`dpkg -s`, `cmp` before copying, restart only on change) had to be
+  written, because the provisioning never runs twice on the same machine.
+- **The price of that simplicity is the feedback loop.** Fixing a mistake in
+  a shell provisioner took one `vagrant provision` of a few seconds. Fixing a
+  mistake in a cloud-init file meant deleting the instance and waiting for a
+  new launch, which is slow when the instance also builds the application.
+  This is the main argument for building the application outside the
+  machine, as discussed in section 6.10.
+- **The immutable workflow is closer to a CI/CD pipeline.** Replacing `app`
+  while `db` kept the data is the same operation a pipeline performs on a
+  deployment. In that sense the alternative is less convenient for
+  development and closer to production practice than the base solution.
+- **Multipass is the fastest way to get one Ubuntu VM**, with a single
+  command and no file. Its limits appear when an environment, and not a
+  machine, has to be described.
+
+---
+
+## 9. References
 
 - Vagrant documentation: <https://developer.hashicorp.com/vagrant/docs>
 - Vagrant shell provisioner: <https://developer.hashicorp.com/vagrant/docs/provisioning/shell>
@@ -2027,3 +2636,15 @@ CA2/part2/provisioning/ssh-key.sh
 - ufw manual: <https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html>
 - Nginx reverse proxy: <https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/>
 - systemd service units (`ExecStartPre`, `Restart`): <https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html>
+- Multipass documentation: <https://documentation.ubuntu.com/multipass/latest/>
+- Multipass `launch` command: <https://documentation.ubuntu.com/multipass/latest/reference/command-line-interface/launch/>
+- Multipass drivers: <https://documentation.ubuntu.com/multipass/latest/explanation/driver/>
+- Multipass static addresses: <https://documentation.ubuntu.com/multipass/latest/how-to-guides/manage-instances/configure-static-ips/>
+- cloud-init module reference: <https://cloudinit.readthedocs.io/en/latest/reference/modules.html>
+- Netplan documentation: <https://netplan.readthedocs.io/en/stable/>
+- Terraform provisioners ("a last resort"): <https://developer.hashicorp.com/terraform/language/resources/provisioners/syntax>
+- OpenTofu documentation: <https://opentofu.org/docs/>
+- Terraform libvirt provider: <https://registry.terraform.io/providers/dmacvicar/libvirt/latest/docs>
+- libvirt network XML format: <https://libvirt.org/formatnetwork.html>
+- `virt-install` manual: <https://manpages.ubuntu.com/manpages/noble/en/man1/virt-install.1.html>
+- Packer documentation: <https://developer.hashicorp.com/packer/docs>
