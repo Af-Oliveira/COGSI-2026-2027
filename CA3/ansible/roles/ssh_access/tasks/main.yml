@@ -1,0 +1,9 @@
+---
+# Replaces CA2 provisioning/ssh-key.sh: the Vagrant insecure key, whose private
+# half is public, is removed and only the custom key is kept.
+- name: Accept only the custom SSH key for {{ ssh_access_user }}
+  ansible.posix.authorized_key:
+    user: "{{ ssh_access_user }}"
+    key: "{{ ssh_access_public_key }}"
+    exclusive: true
+    state: present

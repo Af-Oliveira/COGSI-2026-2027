@@ -1,0 +1,5 @@
+---
+# Account that Vagrant uses to log in. Its only accepted key becomes the one
+# generated for this machine on the host (passed by the Vagrantfile).
+ssh_access_user: vagrant
+ssh_access_public_key: "{{ ssh_public_key }}"
