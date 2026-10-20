@@ -1,0 +1,5 @@
+---
+# Values shared by every tier. The address of each machine comes from the
+# inventory, so the topology is defined in a single place.
+h2_port: 9092
+app_port: 8080
