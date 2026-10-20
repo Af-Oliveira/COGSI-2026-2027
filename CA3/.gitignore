@@ -1,0 +1,10 @@
+# Vagrant runtime state: machine IDs and the SSH settings of each VM.
+# They are unique to the local machine and must never be shared.
+.vagrant/
+
+# SSH key pairs generated for each machine. Private keys are secrets.
+keys/
+
+# Ansible artefacts: retry files and the local Vault password file.
+*.retry
+ansible/.vault_pass
