@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+[Unit]
+Description=H2 database engine in server mode (COGSI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ h2_user }}
+WorkingDirectory={{ h2_data_dir }}
+# -tcp             start only the TCP server (no web console, no PG server)
+# -tcpAllowOthers  accept connections from other machines, not only localhost
+# -baseDir         every database lives under this directory
+# -ifNotExists     let the first client connection create the database
+ExecStart=/usr/bin/java -cp {{ h2_jar }} org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort {{ h2_port }} -baseDir {{ h2_data_dir }} -ifNotExists
+# The JVM exits with 143 when it is stopped with SIGTERM.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

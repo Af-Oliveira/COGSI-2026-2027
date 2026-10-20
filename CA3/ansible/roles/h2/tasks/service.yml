@@ -1,0 +1,42 @@
+---
+- name: Create the h2 service account
+  ansible.builtin.user:
+    name: "{{ h2_user }}"
+    system: true
+    home: "{{ h2_data_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create the data directory
+  ansible.builtin.file:
+    path: "{{ h2_data_dir }}"
+    state: directory
+    owner: "{{ h2_user }}"
+    group: "{{ h2_user }}"
+    mode: "0750"
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: h2.service.j2
+    dest: /etc/systemd/system/h2.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart h2
+
+- name: Enable and start h2
+  ansible.builtin.systemd_service:
+    name: h2
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# A changed unit or jar must be applied now, before the port is checked.
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for H2 to listen on port {{ h2_port }}
+  ansible.builtin.wait_for:
+    port: "{{ h2_port }}"
+    host: 127.0.0.1
+    timeout: 60

@@ -1,0 +1,9 @@
+---
+- name: Allow port {{ h2_port }} only from the application tier
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_ip: "{{ ansible_host }}"
+    port: "{{ h2_port | string }}"
+    proto: tcp
+  loop: "{{ h2_allowed_clients }}"
