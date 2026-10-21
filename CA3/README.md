@@ -558,3 +558,91 @@ Connection to db (192.168.56.22) 9092 port [tcp/*] succeeded!
 
 nc: connect to db (192.168.56.22) port 9092 (tcp) timed out: Operation now in progress
 ```
+
+### 4.7. Secrets with Ansible Vault
+
+> Sensitive credentials must not appear in logs. Use no_log: true on tasks
+> that handle sensitive data to prevent their arguments and results from being
+> exposed in Ansible output
+
+In CA2 the database password was a plain environment variable with a default
+value in the `Vagrantfile`. In CA3 it is encrypted with Ansible Vault:
+
+```text
+ansible/group_vars/all/
+├── main.yml     db_password: "{{ vault_db_password }}"
+└── vault.yml    vault_db_password, encrypted (AES256)
+```
+
+> - The `vault_` prefix makes it clear, in `main.yml`, which values come from
+>   the vault, while the code uses the plain names (`db_password`).
+> - The vault password is in `ansible/.vault_pass`, and the `Vagrantfile`
+>   passes it to every run with `ansible.vault_password_file = ".vault_pass"`.
+>
+> **Why the vault password is versioned.** In a real project this file would
+> never be committed: anyone with the repository could decrypt `vault.yml`.
+> Here it is committed on purpose, so that the evaluator can reproduce the
+> assignment with a plain `vagrant up`. This is acceptable only because both
+> secrets are random values generated for this educational environment (a
+> 32-character vault password and a 24-character database password), used
+> nowhere else, and they protect a database that exists only inside the lab
+> VMs. Ansible Vault and `no_log` still serve their purpose here: the password
+> never appears in plaintext in the repository files or in the Ansible output.
+
+The encrypted file was created inside a guest, where Ansible is installed,
+without writing the plaintext to disk:
+
+```bash
+vagrant ssh db -c "cd /vagrant/ansible && printf 'vault_db_password: \"%s\"\n' '<db password>' \
+  | ansible-vault encrypt --vault-password-file .vault_pass --output group_vars/all/vault.yml -"
+```
+
+Every task whose arguments or results contain the password is marked
+`no_log: true`: the `application.properties` template on `app` and the SQL
+health check on `db`, whose command line carries the password.
+
+### 4.8. Bookstore on app and the health checks of app and db
+
+> Include health-check tasks in your playbook to verify that each service is
+> running correctly [...] A running process or an open port alone is not
+> sufficient
+
+The `bookstore` role replaces `app.sh`: it clones the group repository as the
+unprivileged `bookstore` account, builds with the Gradle Wrapper only when the
+source changed or no jar exists, deploys the jar and the
+`application.properties` template (`no_log: true`), installs the systemd unit
+that waits for the H2 port, and opens port 8080 only to the proxy tier.
+
+| Tier | Check | Why it is application-level |
+| --- | --- | --- |
+| `db` | `org.h2.tools.Shell` runs `SELECT H2VERSION()` over TCP with the Bookstore credentials | the engine must accept the login and execute SQL |
+| `app` | `/actuator/health` must be `UP`, then `/books` must return a JSON list of books with titles | `UP` includes the datasource check; `/books` reads rows from H2 |
+
+```console
+ok: [db] => {
+    "msg": "H2 answered SELECT H2VERSION() on port 9092: 2.4.240"
+}
+ok: [app] => {
+    "msg": "/actuator/health is UP; /books returned HTTP 200 with 2 book(s), first \"Clean Code\""
+}
+db                         : ok=20   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+app                        : ok=25   changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+proxy                      : ok=8    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+> - On the second run the build task is `skipped` (the source did not change)
+>   and nothing else changes.
+> - The first version of the check expected HATEOAS links (`_links`) in
+>   `/books`; the Bookstore on `main` returns a plain JSON list, so the check
+>   failed with HTTP 200. The condition was corrected to validate the list.
+> - The database password was searched for in the output of four runs and
+>   appears in none of them.
+> - From `proxy`, `http://app:8080/books` answers 200; from `db` the
+>   connection times out (ufw).
+
+**Problem found: DNS inside the guests.** After the host changed network, a
+run hung for 20 minutes on `apt`: the guests still used the DNS servers that
+VirtualBox had relayed at boot (`192.168.1.254` and an IPv6 resolver), which
+no longer answered. The `Vagrantfile` now sets
+`vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]`, so the guests
+resolve names through the Windows host.
