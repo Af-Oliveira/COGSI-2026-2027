@@ -21,6 +21,7 @@
 #   .
 #   ├── Vagrantfile
 #   ├── ansible/          playbook, inventory, roles and variables (synced to /vagrant/ansible)
+#   │   └── .vault_pass   Ansible Vault password (not versioned, see the README)
 #   └── keys/             SSH key pairs generated per machine (not versioned, not synced)
 #
 # Host environment variables (all optional):
@@ -102,6 +103,11 @@ Vagrant.configure("2") do |config|
         vb.memory = machine[:memory]
         vb.cpus = machine[:cpus]
         vb.gui = false
+        # Resolve names through the Windows host instead of relaying the DNS
+        # servers of the host network to the guest: when the host changes
+        # network (or only offers an IPv6 resolver), the relayed servers stop
+        # answering and every apt or git operation in the guest hangs.
+        vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
       end
 
       node.vm.provider "vmware_desktop" do |vmware|
@@ -131,6 +137,8 @@ Vagrant.configure("2") do |config|
         ansible.playbook          = "site.yml"
         ansible.limit             = name
         ansible.compatibility_mode = "2.0"
+        # The Vault password stays on the host, in a file that Git ignores.
+        ansible.vault_password_file = ".vault_pass"
         ansible.extra_vars = {
           ssh_public_key: File.read("#{private_key}.pub").strip
         }
