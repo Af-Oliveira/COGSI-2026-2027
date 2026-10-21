@@ -1,0 +1,15 @@
+---
+- name: Install the build dependencies
+  ansible.builtin.import_tasks: install.yml
+
+- name: Build the Bookstore from the group repository
+  ansible.builtin.import_tasks: build.yml
+
+- name: Configure the datasource and the service
+  ansible.builtin.import_tasks: service.yml
+
+- name: Restrict the application port to the proxy tier
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Check that the Bookstore answers
+  ansible.builtin.import_tasks: health.yml

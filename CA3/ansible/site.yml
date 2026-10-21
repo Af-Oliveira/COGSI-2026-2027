@@ -14,3 +14,9 @@
   become: true
   roles:
     - h2
+
+- name: Application tier
+  hosts: appservers
+  become: true
+  roles:
+    - bookstore
