@@ -1,0 +1,32 @@
+---
+# Nginx must answer, and what it answers must be the Bookstore: the book list
+# obtained through the proxy is compared with the one obtained directly from
+# the app machine.
+- name: Request the books through Nginx
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ nginx_listen_port }}/books"
+    return_content: true
+  register: nginx_books
+  until: nginx_books.status == 200
+  retries: 10
+  delay: 3
+  failed_when: >-
+    nginx_books.status != 200 or
+    nginx_books.json is not defined or
+    nginx_books.json is not sequence or
+    nginx_books.json | length == 0
+
+- name: Request the books directly from {{ nginx_upstream_host }}
+  ansible.builtin.uri:
+    url: "http://{{ nginx_upstream_host }}:{{ nginx_upstream_port }}/books"
+    return_content: true
+  register: nginx_upstream_books
+
+- name: Check that Nginx returned the Bookstore response
+  ansible.builtin.assert:
+    that:
+      - nginx_books.json == nginx_upstream_books.json
+    fail_msg: "The response through Nginx differs from the Bookstore on {{ nginx_upstream_host }}"
+    success_msg: >-
+      Nginx on port {{ nginx_listen_port }} forwards to {{ nginx_upstream_host }}:{{ nginx_upstream_port }}:
+      {{ nginx_books.json | length }} book(s), same as the direct request

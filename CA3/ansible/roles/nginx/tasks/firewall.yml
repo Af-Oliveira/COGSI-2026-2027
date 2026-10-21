@@ -1,0 +1,8 @@
+---
+# The proxy is the single entry point: its HTTP port is the only application
+# port open to every network.
+- name: Allow HTTP on port {{ nginx_listen_port }}
+  community.general.ufw:
+    rule: allow
+    port: "{{ nginx_listen_port | string }}"
+    proto: tcp
