@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# pam_pwquality options, read by pam_pwquality.so (common-password).
+
+# Minimum length of a new password.
+minlen = {{ pam_pwquality_minlen }}
+# Minimum number of character classes (lower, upper, digit, other). The
+# *credit options are left at 0, so no particular class is mandatory.
+minclass = {{ pam_pwquality_minclass }}
+# Prompts before pam_pwquality returns an error.
+retry = {{ pam_pwquality_retry }}
+{% if pam_enforce_for_root %}
+# Apply the checks also when root sets the password.
+enforce_for_root
+{% endif %}

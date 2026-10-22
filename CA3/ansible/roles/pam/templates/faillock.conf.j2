@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# pam_faillock options, read by pam_faillock.so (common-auth, common-account).
+# Failure records are kept in /var/run/faillock.
+
+# Consecutive failures that lock the account.
+deny = {{ pam_faillock_deny }}
+# Failures count only if they happen within this interval (seconds).
+fail_interval = {{ pam_faillock_fail_interval }}
+# The account unlocks by itself after this time (seconds).
+unlock_time = {{ pam_faillock_unlock_time }}

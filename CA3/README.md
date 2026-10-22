@@ -78,6 +78,7 @@ CA3/
 │       ├── common/      packages, /etc/hosts, firewall baseline
 │       ├── h2/          H2 server on db
 │       ├── users/       developers group and devuser
+│       ├── pam/         password policy, history and lockout
 │       ├── bookstore/   Bookstore on app
 │       └── nginx/       reverse proxy on proxy
 └── keys/                SSH key pairs generated on the host (not versioned)
@@ -827,3 +828,167 @@ The first run after this change restarted `h2` (new unit) and `bookstore`
 these restarts: the Bookstore seeds its sample data on every start, a
 behaviour of the application already described in CA2, not of the
 provisioning.
+
+### 4.11. PAM password policy, history and account lockout
+
+> Use Ansible to configure PAM to enforce a complex password policy on the app
+> and db VMs: minimum length of 12 characters; at least three of the four
+> character classes [...] do not simply require all four; prevent reuse of
+> the last five passwords; after five consecutive failed login attempts, the
+> account should be locked for ten minutes [...] Document the PAM modules and
+> configuration files used to enforce password history and account lockout,
+> explaining any distribution-specific differences
+
+The `pam` role runs on `app` and `db`, in the same play as `users`.
+
+**Modules and files.**
+
+| Rule | PAM module | Stack file | Options file | Options |
+| --- | --- | --- | --- | --- |
+| Length and classes | `pam_pwquality.so` (package `libpam-pwquality`) | `common-password` | `/etc/security/pwquality.conf` | `minlen = 12`, `minclass = 3`, `retry = 3`, `enforce_for_root` |
+| History | `pam_pwhistory.so` (in `libpam-modules`) | `common-password` | `/etc/security/pwhistory.conf` | `remember = 5`, `enforce_for_root`; old hashes in `/etc/security/opasswd` |
+| Lockout | `pam_faillock.so` (in `libpam-modules`) | `common-auth`, `common-account` | `/etc/security/faillock.conf` | `deny = 5`, `unlock_time = 600`, `fail_interval = 900`; records in `/var/run/faillock` |
+
+> - `minclass = 3` with the `*credit` options left at 0 accepts any three
+>   classes. The lecture example, `lcredit=-1 ucredit=-1 dcredit=-1
+>   ocredit=-1`, would require all four, which the assignment rules out.
+> - The options are in each module's own configuration file, so the PAM lines
+>   stay short and are not edited by hand.
+> - `enforce_for_root` makes the rules apply also when root sets a password
+>   (`passwd devuser`, `chpasswd`), which is how the tests below change it.
+
+**How the modules enter the stack on Ubuntu 24.04.** Debian and Ubuntu build
+`/etc/pam.d/common-*` with `pam-auth-update` from the profiles in
+`/usr/share/pam-configs/`; a hand edit of those files is overwritten the next
+time a PAM package is upgraded. `libpam-pwquality` ships its own profile, but
+Ubuntu 24.04 ships none for `pam_pwhistory` or `pam_faillock`, so the role
+installs three profiles and lets `pam-auth-update` place the lines and compute
+the `success=N` jumps:
+
+```text
+# /usr/share/pam-configs/faillock_notify   (Priority 1024: before pam_unix, 256)
+Auth:     requisite  pam_faillock.so preauth
+Account:  required   pam_faillock.so
+
+# /usr/share/pam-configs/pwhistory         (Priority 1000: after pwquality, before pam_unix)
+Password: requisite  pam_pwhistory.so use_authtok
+
+# /usr/share/pam-configs/faillock          (Priority 0: after pam_unix)
+Auth:     [default=die]  pam_faillock.so authfail
+          sufficient     pam_faillock.so authsucc
+```
+
+```yaml
+# ansible/roles/pam/tasks/stack.yml (excerpt)
+- name: Enable the profiles with pam-auth-update
+  ansible.builtin.command:
+    argv: "{{ ['pam-auth-update', '--package', '--enable'] + pam_profiles }}"
+  when: >-
+    pam_profile_files is changed or
+    'pam_faillock.so preauth' not in pam_stack_text or
+    ...
+  changed_when: true
+```
+
+> `pam-auth-update` is a command, so the role makes it idempotent itself: it
+> runs only when a profile changed or a module is missing from the generated
+> files. A final `assert` checks the order of the modules.
+
+The resulting stack (comments removed):
+
+```text
+# common-auth
+auth     requisite                    pam_faillock.so preauth
+auth     [success=3 default=ignore]   pam_unix.so nullok try_first_pass
+auth     [default=die]                pam_faillock.so authfail
+auth     sufficient                   pam_faillock.so authsucc
+auth     requisite                    pam_deny.so
+auth     required                     pam_permit.so
+
+# common-account
+account  required                     pam_faillock.so
+account  [success=1 new_authtok_reqd=done default=ignore]  pam_unix.so
+
+# common-password
+password requisite                    pam_pwquality.so retry=3
+password requisite                    pam_pwhistory.so use_authtok
+password [success=1 default=ignore]   pam_unix.so obscure use_authtok try_first_pass yescrypt
+```
+
+> **Problem found.** The first version put `account required pam_faillock.so`
+> in the low-priority profile. `pam-auth-update` placed it after
+> `pam_unix.so`, whose `success=2` jumped over it, so it would never run after
+> a successful login. Moving the account line to the high-priority profile put
+> it before `pam_unix.so`; the `assert` now checks that order.
+
+**Distribution-specific differences.**
+
+| | Debian / Ubuntu | RHEL / Fedora / Rocky |
+| --- | --- | --- |
+| Stack files | `/etc/pam.d/common-auth`, `common-account`, `common-password` | `/etc/pam.d/system-auth`, `password-auth` |
+| Tool that writes them | `pam-auth-update` + profiles in `/usr/share/pam-configs` | `authselect` (older: `authconfig`) |
+| Lockout | `pam_faillock` (since Ubuntu 22.04; older releases used `pam_tally2`) | `authselect enable-feature with-faillock` |
+| History | profile written by hand, as here | `authselect enable-feature with-pwhistory` |
+| Quality | `libpam-pwquality` adds its own profile | `pam_pwquality` is in the default profile |
+| Option files | `/etc/security/{pwquality,pwhistory,faillock}.conf` | same files |
+
+On a RHEL family host the role would install the same three `.conf` files
+and replace the profiles with `authselect` features; this is where an
+`include_tasks` chosen by `ansible_os_family` would fit.
+
+**Tests on `app`** (the same role is applied to `db`). Every password change
+goes through `common-password`; root runs `chpasswd` and `enforce_for_root`
+applies the rules:
+
+```console
+== length and character classes
+Ab1!xyz (7 chars, 4 classes)               -> REFUSED: BAD PASSWORD: The password is shorter than 12 characters
+abcdefghijklmn (14 chars, 1 class)         -> REFUSED: BAD PASSWORD: The password contains less than 3 character classes
+laranja!cometa%sol (lower, symbol)         -> REFUSED: BAD PASSWORD: The password contains less than 3 character classes
+Tulipa7Marte9Rio (upper, lower, digit)     -> ACCEPTED
+Laranja!Cometa%Sol (upper, lower, symbol)  -> ACCEPTED
+Girassol42Vento! (4 classes)               -> ACCEPTED
+== history (remember=5)
+Hist0ryPass-01 .. Hist0ryPass-05 (new)     -> ACCEPTED
+Hist0ryPass-01 (reuse of #1)               -> REFUSED: Password has been already used. Choose another.
+Hist0ryPass-03 (reuse of #3)               -> REFUSED: Password has been already used. Choose another.
+Hist0ryPass-06 (new #6)                    -> ACCEPTED
+```
+
+> `Abcdefghij1234` (three classes) was also refused, but by the dictionary
+> check of `pam_pwquality` ("too simplistic/systematic"), not by the class
+> rule; that check is on by default and was kept.
+
+The lockout is tested over SSH from `proxy` to `app`, with `sshpass`
+installed on `proxy` only for the test and removed afterwards:
+
+```console
+attempt 1 (wrong password): Permission denied, please try again.
+...
+attempt 5 (wrong password): Permission denied, please try again.
+attempt 6 (correct password): Permission denied, please try again.
+
+$ sudo faillock --user devuser
+devuser:
+When                Type  Source                                           Valid
+2026-10-26 18:07:35 RHOST 192.168.56.20                                        V
+2026-10-26 18:07:39 RHOST 192.168.56.20                                        V
+2026-10-26 18:07:44 RHOST 192.168.56.20                                        V
+2026-10-26 18:07:46 RHOST 192.168.56.20                                        V
+2026-10-26 18:07:50 RHOST 192.168.56.20                                        V
+
+$ sudo grep pam_faillock /var/log/auth.log
+app sshd[24016]: pam_faillock(sshd:auth): Consecutive login failures for user devuser account temporarily locked
+
+$ sudo faillock --user devuser --reset      # instead of waiting the 600 s
+after reset (correct password): logged in as devuser
+```
+
+> - The sixth attempt uses the correct password and is refused: the account
+>   is locked, not just the password rejected.
+> - Vagrant and Ansible are not affected: they log in with the SSH key, which
+>   does not go through the password check, and `sudo` is configured without
+>   a password for `vagrant`.
+
+The first run of the role reported `changed=6` on `db`; the second run
+reported `changed=0` on both machines.
