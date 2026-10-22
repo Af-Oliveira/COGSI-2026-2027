@@ -1,0 +1,40 @@
+---
+# Debian and Ubuntu generate /etc/pam.d/common-* with pam-auth-update from the
+# profiles in /usr/share/pam-configs; hand edits to those files are lost on
+# the next package upgrade. The role adds its own profiles and lets
+# pam-auth-update place the lines and compute the jumps.
+- name: Install the pam-auth-update profiles
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/share/pam-configs/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ pam_profiles }}"
+  register: pam_profile_files
+
+- name: Read the generated PAM stack
+  ansible.builtin.slurp:
+    src: "/etc/pam.d/{{ item }}"
+  loop:
+    - common-auth
+    - common-account
+    - common-password
+  register: pam_stack
+
+- name: Decide whether the stack must be regenerated
+  ansible.builtin.set_fact:
+    pam_stack_text: "{{ pam_stack.results | map(attribute='content') | map('b64decode') | join('\n') }}"
+
+# Run only when a profile changed or a module is missing from the stack, so a
+# second run reports no change.
+- name: Enable the profiles with pam-auth-update
+  ansible.builtin.command:
+    argv: "{{ ['pam-auth-update', '--package', '--enable'] + pam_profiles }}"
+  when: >-
+    pam_profile_files is changed or
+    'pam_faillock.so preauth' not in pam_stack_text or
+    'pam_faillock.so authfail' not in pam_stack_text or
+    'pam_pwhistory.so' not in pam_stack_text or
+    'pam_pwquality.so' not in pam_stack_text
+  changed_when: true

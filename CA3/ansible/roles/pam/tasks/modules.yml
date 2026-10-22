@@ -1,0 +1,39 @@
+---
+# Installing libpam-pwquality also enables its pam-auth-update profile, which
+# puts pam_pwquality.so in front of pam_unix.so in common-password.
+- name: Install libpam-pwquality
+  ansible.builtin.apt:
+    name: libpam-pwquality
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: pam_apt
+  until: pam_apt is succeeded
+  retries: 5
+  delay: 10
+
+# The options live in each module's own configuration file instead of the PAM
+# lines, so the lines stay as pam-auth-update writes them.
+- name: Configure the password quality rules
+  ansible.builtin.template:
+    src: pwquality.conf.j2
+    dest: /etc/security/pwquality.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure the password history
+  ansible.builtin.template:
+    src: pwhistory.conf.j2
+    dest: /etc/security/pwhistory.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure the account lockout
+  ansible.builtin.template:
+    src: faillock.conf.j2
+    dest: /etc/security/faillock.conf
+    owner: root
+    group: root
+    mode: "0644"
