@@ -1,0 +1,30 @@
+---
+- name: Ensure the {{ users_group }} group exists
+  ansible.builtin.group:
+    name: "{{ users_group }}"
+    state: present
+
+# The hash is computed from the Vault password with a fixed salt, so the same
+# input always gives the same hash and a second run reports no change.
+# update_password: on_create keeps a password that the user changed later,
+# for example to test the PAM history.
+- name: Create {{ users_devuser }} as a member of {{ users_group }}
+  ansible.builtin.user:
+    name: "{{ users_devuser }}"
+    shell: /bin/bash
+    create_home: true
+    groups: "{{ users_group }}"
+    append: true
+    password: "{{ devuser_password | password_hash('sha512', devuser_password_salt) }}"
+    update_password: on_create
+    state: present
+  no_log: true
+
+- name: Report the {{ users_group }} membership
+  ansible.builtin.command: getent group {{ users_group }}
+  register: users_group_entry
+  changed_when: false
+
+- name: Show the {{ users_group }} group
+  ansible.builtin.debug:
+    msg: "{{ users_group_entry.stdout }}"

@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 User={{ h2_user }}
+Group={{ h2_data_group }}
+# Database files are created readable and writable by the group, not by others.
+UMask=0007
 WorkingDirectory={{ h2_data_dir }}
 # -tcp             start only the TCP server (no web console, no PG server)
 # -tcpAllowOthers  accept connections from other machines, not only localhost

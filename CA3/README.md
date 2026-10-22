@@ -77,6 +77,7 @@ CA3/
 │       ├── ssh_access/  custom SSH key per machine
 │       ├── common/      packages, /etc/hosts, firewall baseline
 │       ├── h2/          H2 server on db
+│       ├── users/       developers group and devuser
 │       ├── bookstore/   Bookstore on app
 │       └── nginx/       reverse proxy on proxy
 └── keys/                SSH key pairs generated on the host (not versioned)
@@ -729,3 +730,100 @@ FAILED - RETRYING: [proxy]: nginx : Request the books through Nginx (9 retries l
 fatal: [proxy]: FAILED! => {"attempts": 10, "changed": false, "content": "<html>\r\n<head><title>502 Bad Gateway</title></head> ...
 proxy                      : ok=16   changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0
 ```
+
+### 4.10. The developers group, devuser and the service accounts
+
+> Use Ansible to create a group called developers and a user called devuser on
+> the app and db VMs. Add devuser to the developers group. Place the Bookstore
+> application on app and the database file on db in directories whose access
+> permissions restrict access to members of the developers group [...] Ensure
+> that service accounts have the permissions required to run the application
+> and access the database. Use group membership, ownership, or ACLs as
+> appropriate
+
+A play applies the `users` role to `app` and `db` before the tier roles, so
+the group exists when the services are configured:
+
+```yaml
+# ansible/site.yml (excerpt)
+- name: Developers and access control on app and db
+  hosts: dbservers:appservers
+  become: true
+  roles:
+    - users
+```
+
+```yaml
+# ansible/roles/users/tasks/main.yml (excerpt)
+- name: Create {{ users_devuser }} as a member of {{ users_group }}
+  ansible.builtin.user:
+    name: "{{ users_devuser }}"
+    shell: /bin/bash
+    create_home: true
+    groups: "{{ users_group }}"
+    append: true
+    password: "{{ devuser_password | password_hash('sha512', devuser_password_salt) }}"
+    update_password: on_create
+    state: present
+  no_log: true
+```
+
+> - The password and the salt are in the vault. With a fixed salt the hash is
+>   always the same, so the task is idempotent; with a random salt every run
+>   would produce a new hash and report `changed`.
+> - `update_password: on_create` sets the password only when the account is
+>   created. A password changed later by the user (the PAM tests do it) is
+>   not reverted by the next run.
+> - `no_log: true` hides the arguments of the task, which contain the hash:
+>   the output only shows `changed: [db]`.
+
+**Group membership was chosen over ACLs.** Each directory has a single owner
+and a single group that needs access, which ordinary permissions express
+exactly; ACLs would add a second permission model to audit for no gain.
+
+| Machine | Path | Owner:group | Mode | Who gets in |
+| --- | --- | --- | --- | --- |
+| `app` | `/opt/bookstore` | `root:developers` | `0750` | root, `devuser`, `bookstore` |
+| `app` | `/opt/bookstore/bookstore.jar` | `root:developers` | `0640` | read only |
+| `app` | `/etc/bookstore` | `root:bookstore` | `0750` | root and the service only: it holds the database password |
+| `db` | `/var/lib/h2` | `h2:developers` | `2770` | root, `devuser`, `h2` |
+| `db` | `/var/lib/h2/bookstore.mv.db` | `h2:developers` | `0660` | read and write for the group |
+
+> - The service accounts `bookstore` and `h2` are added to `developers`
+>   (`groups: developers`, `append: true`), which is what lets them keep
+>   reading the jar and writing the database once the directories belong to
+>   the group.
+> - On `db`, the setgid bit (`2770`) and `UMask=0007` in `h2.service` make
+>   every file that H2 creates belong to `developers` and stay closed to
+>   others. The database file created before this change was moved to the
+>   group by a `find` + `file` loop.
+> - The jar is root-owned: the service can run it but not replace it.
+
+```console
+$ vagrant ssh db
+developers:x:1001:devuser,h2
+drwxrws--- 2 h2 developers 4096 Oct 26 16:11 /var/lib/h2
+-rw-rw---- 1 h2 developers 65536 Oct 26 17:49 bookstore.mv.db
+-- devuser:
+bookstore.mv.db
+-- vagrant (not in developers):
+ls: cannot open directory '/var/lib/h2': Permission denied
+active
+
+$ vagrant ssh app
+drwxr-x--- 2 root developers 4096 Oct 26 16:51 /opt/bookstore
+-rw-r----- 1 root developers 55806170 Oct 26 16:51 bookstore.jar
+-- devuser:
+-rw-r----- 1 root developers 55806170 Oct 26 16:51 bookstore.jar
+cat: /etc/bookstore/application.properties: Permission denied
+-- vagrant:
+ls: cannot open directory '/opt/bookstore': Permission denied
+active
+```
+
+The first run after this change restarted `h2` (new unit) and `bookstore`
+(new jar group), and the health checks waited for both. The next run reported
+`changed=0` on the three machines. The book count grew from 2 to 6 across
+these restarts: the Bookstore seeds its sample data on every start, a
+behaviour of the application already described in CA2, not of the
+provisioning.
