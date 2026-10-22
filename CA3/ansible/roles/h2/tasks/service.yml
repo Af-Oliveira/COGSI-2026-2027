@@ -6,14 +6,34 @@
     home: "{{ h2_data_dir }}"
     create_home: false
     shell: /usr/sbin/nologin
+    groups: "{{ h2_data_group }}"
+    append: true
 
 - name: Create the data directory
   ansible.builtin.file:
     path: "{{ h2_data_dir }}"
     state: directory
     owner: "{{ h2_user }}"
-    group: "{{ h2_user }}"
-    mode: "0750"
+    group: "{{ h2_data_group }}"
+    # setgid: files created by H2 inherit the group of the directory.
+    mode: "2770"
+
+# Database files created before the directory belonged to the developers
+# group (or copied in) are brought to the same ownership and mode.
+- name: Find the existing database files
+  ansible.builtin.find:
+    paths: "{{ h2_data_dir }}"
+  register: h2_data_files
+
+- name: Give the database files to the {{ h2_data_group }} group
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ h2_user }}"
+    group: "{{ h2_data_group }}"
+    mode: "u=rw,g=rw,o="
+  loop: "{{ h2_data_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
 
 - name: Install the systemd unit
   ansible.builtin.template:

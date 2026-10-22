@@ -19,3 +19,5 @@
     home: "{{ bookstore_home }}"
     create_home: true
     shell: /usr/sbin/nologin
+    groups: "{{ bookstore_app_group }}"
+    append: true
