@@ -1,0 +1,81 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# =============================================================================
+# Vagrantfile - COGSI CA3 / Alternative (Puppet)
+# -----------------------------------------------------------------------------
+# The same three tiers as the Ansible solution, configured with Puppet in
+# masterless mode (puppet apply), on other addresses and another host port so
+# that both environments can run side by side:
+#
+#   host browser --8081--> proxy (Nginx) --8080--> app (Spring Boot) --9092--> db (H2)
+#
+#   Machine  Private address   Puppet node block
+#   db       192.168.56.32     node /^db/     (cogsi_common, users, pam, h2)
+#   app      192.168.56.31     node /^app/    (cogsi_common, users, pam, bookstore)
+#   proxy    192.168.56.30     node /^proxy/  (cogsi_common, nginx)
+#
+# Useful commands:
+#   vagrant up
+#   vagrant provision            apply the manifests again (idempotence check)
+# =============================================================================
+
+Vagrant.require_version ">= 2.4.0", "< 3.0.0"
+
+app_memory = ENV["APP_MEMORY"] || "2048"
+app_cpus   = ENV["APP_CPUS"]   || "2"
+proxy_host_port = (ENV["PROXY_HOST_PORT"] || "8081").to_i
+
+MACHINES = {
+  "db"    => { ip: "192.168.56.32", memory: "768",      cpus: "1" },
+  "app"   => { ip: "192.168.56.31", memory: app_memory, cpus: app_cpus },
+  "proxy" => { ip: "192.168.56.30", memory: "512",      cpus: "1" }
+}
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "bento/ubuntu-24.04"
+  config.vm.box_version = "202510.26.0"
+  config.vm.box_check_update = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  # The puppet provisioner uploads the manifests, the modules and hiera.yaml,
+  # but not the Hiera data directory, so the Puppet project is shared too.
+  config.vm.synced_folder "./puppet", "/vagrant/puppet",
+    mount_options: ["dmode=755", "fmode=644"]
+
+  MACHINES.each do |name, machine|
+    config.vm.define name do |node|
+      node.vm.hostname = name
+      node.vm.network "private_network", ip: machine[:ip]
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = "cogsi-ca3-puppet-#{name}"
+        vb.memory = machine[:memory]
+        vb.cpus = machine[:cpus]
+        vb.gui = false
+        vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      end
+
+      if name == "proxy"
+        node.vm.network "forwarded_port",
+          guest: 80, host: proxy_host_port,
+          host_ip: "127.0.0.1", auto_correct: true
+      end
+
+      # The puppet provisioner expects Puppet in the guest, as the ansible
+      # provisioner expects Python. Ubuntu 24.04 packages it (puppet-agent).
+      node.vm.provision "shell",
+        name: "install_puppet",
+        inline: "command -v puppet >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq puppet-agent >/dev/null; }; puppet --version"
+
+      node.vm.provision "puppet" do |puppet|
+        puppet.manifests_path    = "puppet/manifests"
+        puppet.manifest_file     = "site.pp"
+        puppet.module_path       = "puppet/modules"
+        puppet.hiera_config_path = "puppet/hiera.yaml"
+        puppet.working_directory = "/tmp/vagrant-puppet"
+        # Exit code 2 means "changes applied", 0 "nothing to change".
+        puppet.options = "--detailed-exitcodes --summarize"
+      end
+    end
+  end
+end
