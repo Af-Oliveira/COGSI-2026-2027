@@ -1,0 +1,18 @@
+#!/bin/bash
+# Managed by Puppet (cogsi_bookstore).
+# Usage: bookstore-health <base URL>
+# Succeeds when /actuator/health is UP and /books returns a non-empty JSON list
+# of books with titles; retries for up to 240 seconds after a (re)start.
+set -u
+base=${1:?base URL is required}
+for _ in $(seq 1 48); do
+    if curl -fsS "$base/actuator/health" 2>/dev/null | grep -q '"status":"UP"' &&
+       curl -fsS "$base/books" 2>/dev/null | python3 -c '
+import json, sys
+books = json.load(sys.stdin)
+sys.exit(0 if isinstance(books, list) and books and all("title" in b for b in books) else 1)'; then
+        exit 0
+    fi
+    sleep 5
+done
+exit 1
