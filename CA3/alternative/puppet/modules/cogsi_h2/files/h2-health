@@ -1,0 +1,13 @@
+#!/bin/bash
+# Managed by Puppet (cogsi_h2). Succeeds when H2 answers a SQL query with the
+# Bookstore credentials; retries for up to 60 seconds after a (re)start.
+set -u
+. /etc/h2-health.conf
+for _ in $(seq 1 20); do
+    if /usr/bin/java -cp "$H2_JAR" org.h2.tools.Shell -url "$H2_URL" -user "$H2_USER" \
+        -password "$H2_PASSWORD" -sql "SELECT H2VERSION() AS VERSION" 2>/dev/null | grep -q "$H2_VERSION"; then
+        exit 0
+    fi
+    sleep 3
+done
+exit 1

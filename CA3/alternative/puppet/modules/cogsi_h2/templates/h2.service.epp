@@ -1,0 +1,19 @@
+<%- | String $jar, Integer $port, String $data_dir, String $group | -%>
+# Managed by Puppet (cogsi_h2) - manual changes are overwritten.
+[Unit]
+Description=H2 database engine in server mode (COGSI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=h2
+Group=<%= $group %>
+UMask=0007
+WorkingDirectory=<%= $data_dir %>
+ExecStart=/usr/bin/java -cp <%= $jar %> org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort <%= $port %> -baseDir <%= $data_dir %> -ifNotExists
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+<%- | String $db_host, Integer $h2_port, String $db_name, String $db_user, String $db_password, Integer $app_port | -%>
+# Managed by Puppet (cogsi_bookstore) - manual changes are overwritten.
+spring.datasource.url=jdbc:h2:tcp://<%= $db_host %>:<%= $h2_port %>/./<%= $db_name %>
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=<%= $db_user %>
+spring.datasource.password=<%= $db_password %>
+spring.jpa.hibernate.ddl-auto=update
+server.port=<%= $app_port %>
+spring.jpa.show-sql=false
