@@ -992,3 +992,94 @@ after reset (correct password): logged in as devuser
 
 The first run of the role reported `changed=6` on `db`; the second run
 reported `changed=0` on both machines.
+
+### 4.12. Idempotence: two consecutive runs
+
+> Ensure that your playbooks are idempotent. Handle errors and transient
+> conditions using failed_when and retries/until where appropriate. Run the
+> playbook twice; the second run should show 0 (or minimal) changes. Paste
+> both summaries. Explain any changes reported during the second run,
+> identifying whether they are expected or indicate an idempotency issue
+
+The environment was destroyed and created again, so that the first run starts
+from the bare box, and the playbook was applied a second time right after:
+
+```bash
+vagrant destroy -f
+APP_CPUS=1 vagrant up          # first run (about 24 minutes, including the Gradle build)
+vagrant provision              # second run (about 4 minutes)
+```
+
+First run (`vagrant up`):
+
+```console
+db                         : ok=37   changed=22   unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+app                        : ok=42   changed=26   unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+proxy                      : ok=20   changed=11   unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+Second run (`vagrant provision`):
+
+```console
+db                         : ok=36   changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+app                        : ok=39   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0
+proxy                      : ok=19   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+> - The second run reports **`changed=0` on the three machines**: every task
+>   found the machine already in the desired state.
+> - The `skipped` tasks are expected: `pam-auth-update` runs only when a
+>   profile changed or a module is missing, and the Gradle build only when
+>   the clone moved to a new commit.
+> - In earlier runs during development the second run reported two changes on
+>   `app`: `Clone the group repository` and `Build the jar`. They were
+>   **expected, not an idempotency issue**: pull requests had been merged into
+>   `main` between the two runs, so the clone moved to the new commit and the
+>   build ran again. The rebuilt jar was identical, so `Deploy the jar`
+>   reported `ok` and the Bookstore was not restarted.
+> - The health checks run on every execution and report `ok`, never
+>   `changed`: they use `uri`, or `command` with `changed_when: false`.
+
+How the roles stay idempotent:
+
+| Technique | Where |
+| --- | --- |
+| Modules that compare the current state before acting (`apt`, `user`, `group`, `file`, `template`, `copy`, `get_url`, `blockinfile`, `ufw`, `authorized_key`) | every role |
+| Handlers, so a service restarts only after a change | `h2`, `bookstore`, `nginx` |
+| `when` on commands, from registered state | Gradle build, `pam-auth-update` |
+| `changed_when: false` on read-only commands | `nginx -t`, `getent`, the H2 SQL check |
+| Fixed salt for the password hash, `update_password: on_create` | `users` |
+| `cache_valid_time` on the package index | every `apt` task |
+
+Errors and transient conditions:
+
+| Mechanism | Where | Why |
+| --- | --- | --- |
+| `until` + `retries` + `delay` | `apt`, `get_url`, `git` | dpkg lock held by `unattended-upgrades` on the first boot, mirror or network hiccups |
+| `until` + `retries` | Bookstore and Nginx HTTP checks, H2 SQL check | the services take time to start after a restart |
+| `failed_when` | H2 SQL check, `/books` check, jar lookup | the exit code or HTTP status alone does not prove that the service works |
+| `assert` | PAM order, proxy forwarding | fail with a clear message when the result is wrong |
+
+**Check mode.** `ansible-playbook --check` reports what would change
+without changing it:
+
+```bash
+# run on each machine (db, app, proxy); app shown
+vagrant ssh app -c 'cd /vagrant/ansible && ansible-playbook site.yml --limit app --check \
+  --vault-password-file .vault_pass -e "ssh_public_key=\"$(cat ~/.ssh/authorized_keys)\""'
+```
+
+```console
+db                         : ok=35   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0
+app                        : ok=39   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0
+proxy                      : ok=19   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+> **Problem found.** The first check run failed on `app`: in check mode
+> Ansible skips `command` and `uri` tasks, because it cannot know whether
+> they change anything, so the health checks did not run and the `debug`
+> that prints their result failed. Those tasks only read state, so they are
+> marked `check_mode: false` and now run in check mode too. Check mode
+> remains a preview: a task that depends on a change made earlier in the
+> same run (for example, a service started by a new unit file) cannot be
+> fully validated.
