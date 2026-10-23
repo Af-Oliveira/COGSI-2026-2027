@@ -19,6 +19,8 @@
       - "SELECT H2VERSION() AS VERSION"
   register: h2_health
   changed_when: false
+  # Read-only: also runs in --check mode.
+  check_mode: false
   failed_when: h2_health.rc != 0 or h2_version not in h2_health.stdout
   until: h2_health is succeeded
   retries: 5

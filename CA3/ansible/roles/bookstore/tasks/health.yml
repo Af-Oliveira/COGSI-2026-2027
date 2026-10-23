@@ -6,6 +6,8 @@
     url: "http://127.0.0.1:{{ app_port }}/actuator/health"
     return_content: true
   register: bookstore_health
+  # Read-only requests: also run in --check mode.
+  check_mode: false
   until: bookstore_health.status == 200 and (bookstore_health.json.status | default('')) == 'UP'
   retries: "{{ (bookstore_startup_timeout / 5) | int }}"
   delay: 5
@@ -17,6 +19,7 @@
     url: "http://127.0.0.1:{{ app_port }}/books"
     return_content: true
   register: bookstore_books
+  check_mode: false
   failed_when: >-
     bookstore_books.status != 200 or
     bookstore_books.json is not defined or
