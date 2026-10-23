@@ -7,6 +7,8 @@
     url: "http://127.0.0.1:{{ nginx_listen_port }}/books"
     return_content: true
   register: nginx_books
+  # Read-only requests: also run in --check mode.
+  check_mode: false
   until: nginx_books.status == 200
   retries: 10
   delay: 3
@@ -21,6 +23,7 @@
     url: "http://{{ nginx_upstream_host }}:{{ nginx_upstream_port }}/books"
     return_content: true
   register: nginx_upstream_books
+  check_mode: false
 
 - name: Check that Nginx returned the Bookstore response
   ansible.builtin.assert:
