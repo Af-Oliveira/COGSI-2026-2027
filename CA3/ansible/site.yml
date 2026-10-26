@@ -1,0 +1,9 @@
+---
+# Entry point of the Ansible provisioning. Vagrant runs it once per machine,
+# limited to that machine, in the order db, app, proxy.
+
+- name: Baseline of every machine
+  hosts: all
+  become: true
+  roles:
+    - ssh_access
