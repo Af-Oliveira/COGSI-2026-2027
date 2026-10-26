@@ -7,3 +7,6 @@
 
 - name: Restrict the H2 port to the application tier
   ansible.builtin.import_tasks: firewall.yml
+
+- name: Check that H2 answers SQL queries
+  ansible.builtin.import_tasks: health.yml
