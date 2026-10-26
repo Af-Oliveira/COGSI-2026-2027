@@ -1,0 +1,35 @@
+---
+- name: Install the Java runtime
+  ansible.builtin.apt:
+    name: openjdk-21-jre-headless
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: h2_java
+  until: h2_java is succeeded
+  retries: 5
+  delay: 10
+
+- name: Create the installation directory
+  ansible.builtin.file:
+    path: "{{ h2_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# get_url downloads only when the file is missing or its checksum differs, and
+# fails when the downloaded file does not match the published checksum.
+- name: Download H2 {{ h2_version }}
+  ansible.builtin.get_url:
+    url: "{{ h2_url }}"
+    dest: "{{ h2_jar }}"
+    checksum: "sha1:{{ h2_sha1 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: h2_download
+  until: h2_download is succeeded
+  retries: 3
+  delay: 5
+  notify: Restart h2
