@@ -9,3 +9,10 @@ app_port: 8080
 db_name: bookstore
 db_user: bookstore
 db_password: "{{ vault_db_password }}"
+
+# Group whose members may read the application on app and the database files
+# on db, and the developer account that belongs to it.
+developers_group: developers
+devuser_name: devuser
+devuser_password: "{{ vault_devuser_password }}"
+devuser_password_salt: "{{ vault_devuser_password_salt }}"
