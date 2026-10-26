@@ -1,0 +1,12 @@
+<%- | Hash[String, String] $hosts | -%>
+# Managed by Puppet (cogsi_common) - manual changes are overwritten.
+127.0.0.1 localhost
+127.0.1.1 <%= $facts['networking']['hostname'] %>
+::1 localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+
+# Machines of the environment
+<% $hosts.keys.sort.each |$name| { -%>
+<%= $hosts[$name] %> <%= $name %>
+<% } -%>

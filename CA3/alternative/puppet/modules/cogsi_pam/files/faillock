@@ -1,0 +1,7 @@
+Name: Count failed logins and lock the account (pam_faillock, managed by Puppet)
+Default: yes
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die]	pam_faillock.so authfail
+	sufficient	pam_faillock.so authsucc

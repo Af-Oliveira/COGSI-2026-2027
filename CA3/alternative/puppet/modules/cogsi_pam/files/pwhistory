@@ -1,0 +1,8 @@
+Name: Remember the last passwords (pam_pwhistory, managed by Puppet)
+Default: yes
+Priority: 1000
+Password-Type: Primary
+Password:
+	requisite	pam_pwhistory.so use_authtok
+Password-Initial:
+	requisite	pam_pwhistory.so
