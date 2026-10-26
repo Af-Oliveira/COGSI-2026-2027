@@ -23,6 +23,7 @@ the assignment.
 2. [Environment and prerequisites](#2-environment-and-prerequisites)
 3. [Repository layout](#3-repository-layout)
 4. [Ansible provisioning](#4-ansible-provisioning)
+5. [Alternative solution - analysis and design](#5-alternative-solution---analysis-and-design)
 
 ---
 
@@ -1083,3 +1084,91 @@ proxy                      : ok=19   changed=0    unreachable=0    failed=0    s
 > remains a preview: a task that depends on a change made earlier in the
 > same run (for example, a service started by a new unit file) cannot be
 > fully validated.
+
+---
+
+## 5. Alternative solution - analysis and design
+
+> Present alternative technological solutions for the configuration
+> management tool (i.e., not based on Ansible). Analyze how the alternative
+> solutions compare to your base solution: present how the alternative tools
+> compare to Ansible regarding configuration management features; describe
+> how the alternative tools could be used (i.e., only the design of the
+> solution) to solve the same goals as presented for this assignment
+
+Three configuration management tools were analysed: **Puppet**, **Chef
+Infra** and **Salt** (SaltStack). Like Ansible, all three describe the desired
+state of a machine and converge it; they differ in how the description is
+written, how it reaches the machine and how the order of the changes is
+decided.
+
+### 5.1. Comparison with Ansible
+
+| Feature | Ansible (base solution) | Puppet | Chef Infra | Salt |
+| --- | --- | --- | --- | --- |
+| Architecture | Agentless: a control node connects to the managed nodes over SSH and pushes small Python modules | Agent on every node pulls a compiled catalogue from a Puppet server; or masterless with `puppet apply` | Agent (`chef-client`) pulls cookbooks from a Chef server; or local mode (`chef-client -z`, Chef Solo) | Minion agents connected to a master through a message bus (ZeroMQ); or masterless (`salt-call --local`); also agentless `salt-ssh` |
+| Language | YAML playbooks, Jinja2 expressions | Puppet DSL (declarative, own language) | Ruby DSL (recipes are Ruby code) | YAML states rendered with Jinja2 |
+| Order of the changes | The order written in the playbook | A dependency graph: order only where declared (`require`, `before`, `notify`, `->`); otherwise any order | The order written in the recipe (two passes: compile, then converge) | The order written in the file, plus requisites (`require`, `watch`, `onchanges`) |
+| Unit of reuse | Role, collection | Module (classes, defined types, templates, files); roles-and-profiles pattern | Cookbook (recipes, attributes, templates, resources) | Formula (states, templates), pillar for data |
+| Configuration data | `group_vars`, `host_vars`, inventory, `defaults/` | Hiera (YAML hierarchy per node, OS, environment) | Attributes (cookbook, role, environment, node) | Pillar (data sent only to the targeted minions), grains (facts) |
+| Templates | Jinja2 | EPP (Puppet) or ERB (Ruby) | ERB | Jinja2 |
+| Secrets | Ansible Vault, `no_log` | `Sensitive` data type (redacted from logs and reports), Hiera eyaml backend | Encrypted data bags, Chef Vault | Pillar with the GPG renderer, `show_changes: False` |
+| Idempotence of commands | `creates`, `removes`, `changed_when` | `exec` with `creates`, `unless`, `onlyif`, `refreshonly` | `execute` with `creates`, `not_if`, `only_if` | `cmd.run` with `creates`, `unless`, `onlyif` |
+| Retries and failure control | `until`/`retries`/`delay`, `failed_when`, `ignore_errors` | `exec` `tries`/`try_sleep`, `returns`; no generic retry for other resources | `retries`/`retry_delay` on every resource, `ignore_failure` | `retry` (attempts, interval, until) on every state, `onfail` |
+| Dry run | `--check`, `--diff` | `--noop` | why-run mode (`-W`) | `test=True` |
+| Run on change only | Handlers (`notify`) | `notify`/`subscribe` with `refreshonly` | `notifies`/`subscribes` | `watch`, `onchanges` |
+| Inventory | Static or dynamic inventory files and plugins | Nodes registered on the server (certificates), PuppetDB, external node classifier | Nodes registered on the Chef server, search | Minions accepted by key, targeting by name, grains or pillar |
+| Vagrant provisioners | `ansible`, `ansible_local` | `puppet` (apply), `puppet_server` | `chef_solo`, `chef_zero`, `chef_client`, `chef_apply` | `salt` |
+| Licence | GPLv3 (ansible-core) | Apache 2.0 code; since 2025 Perforce publishes new builds in a private repository under an EULA (commercial licence above 25 nodes), and Vox Pupuli maintains the open fork OpenVox | Apache 2.0 code; the Chef Infra Client binaries do not run until the EULA is accepted (`--chef-license accept`, `CHEF_LICENSE`) | Apache 2.0 |
+
+How they compare with the base solution:
+
+- **Push or pull.** Ansible pushes on demand; nothing runs on the machines
+  between two runs. Puppet, Chef and Salt are designed around an agent that
+  runs periodically and corrects drift by itself. In a Vagrant environment all
+  four are used the same way, triggered by `vagrant up` or `vagrant
+  provision`, so the difference matters only beyond the laboratory.
+- **Ordered list or graph.** An Ansible play is a list: the order of the
+  tasks is the order of execution. Puppet builds a graph and needs explicit
+  dependencies; forgetting one (for example, starting a service before its
+  unit file exists) works by chance in one run and fails in another. Chef and
+  Salt follow the file order, like Ansible.
+- **Language.** Ansible and Salt use YAML with Jinja2, so a playbook and a
+  state file look alike. Puppet has its own language, more expressive for
+  resources and relationships, and Chef is plain Ruby, the most flexible and
+  the one closest to programming.
+- **Secrets.** All four can keep a secret out of the repository and out of
+  the logs, with different mechanisms (Vault and `no_log`, `Sensitive` and
+  eyaml, encrypted data bags, GPG pillar).
+- **Health checks.** Ansible's `uri` with `until`/`retries` and
+  `failed_when` expresses the CA3 health checks directly. Chef and Salt have
+  `retries` on every resource; Puppet only on `exec`, so its HTTP checks are
+  `exec` resources running `curl`.
+
+### 5.2. Design of the assignment with each alternative
+
+| Goal in CA3 | Ansible (base solution) | Puppet | Chef Infra | Salt |
+| --- | --- | --- | --- | --- |
+| Run from Vagrant | `ansible_local`, `site.yml` limited to each machine | `puppet` provisioner, masterless `puppet apply` of `manifests/site.pp` with `node` blocks per machine | `chef_zero` provisioner, a run list per machine | `salt` provisioner, masterless, a `top.sls` that maps each minion to its states |
+| Inventory and groups | `hosts.ini` with three groups | `node 'db'`, `node 'app'`, `node 'proxy'` in `site.pp`; addresses in Hiera | Roles `db`, `app`, `proxy` in the run lists; addresses in attributes | Targeting by minion id in `top.sls`; addresses in pillar |
+| Modularity | Roles `common`, `h2`, `bookstore`, `nginx`, `users`, `pam` | One module per role, classes per concern (`h2::install`, `h2::service`) | One cookbook per role, one recipe per concern | One formula (folder of states) per role |
+| H2 on db | `get_url` with checksum, `template` unit, handler | `file` with `source` and `checksum_value`, `file` from an EPP template, `service` subscribed to both | `remote_file` with `checksum`, `template`, `service` with `subscribes` | `file.managed` with `source_hash`, `service.running` with `watch` |
+| Bookstore on app | `git`, Gradle build guarded by `when`, `copy`, handler | `vcsrepo` (module) or `exec git`, `exec gradlew` with `refreshonly`, `file` jar | `git` resource, `execute` with `not_if`, `remote_file` | `git.latest`, `cmd.run` with `onchanges`, `file.managed` |
+| Nginx on proxy | `template`, `nginx -t`, reload handler | `file` site, `exec nginx -t` before `service` reload | `template` with `verify 'nginx -t -c %{path}'` | `file.managed` with `check_cmd`, `service.running` with `reload: True` |
+| PAM | Profiles and `pam-auth-update`, option files | `file` for the option files and profiles, `exec pam-auth-update` with `unless` | `template` resources, `execute` with `not_if` | `file.managed`, `cmd.run` with `unless` |
+| developers, devuser | `group`, `user` with hash, `no_log` | `group`, `user` with a `Sensitive` password hash | `group`, `user` resources | `group.present`, `user.present` |
+| Secrets | Ansible Vault | Hiera eyaml, `Sensitive` | Encrypted data bag | GPG pillar |
+| Health checks | `uri` with `until`/`retries`, `assert` | `exec` with `curl`, `tries`, `try_sleep`, `unless` | `http_request` or `ruby_block` with `retries` | `http.query` or `cmd.run` with `retry` |
+| Idempotence evidence | `PLAY RECAP` `changed=0` | `Notice: Applied catalog` with no `changed` resources; `--detailed-exitcodes` returns 0 | Chef run summary: `0/N resources updated` | Summary `Succeeded: N (changed=0)` |
+
+Puppet was chosen for the implementation:
+
+- It is the alternative most different from Ansible (pull-oriented design,
+  own declarative language, dependency graph), which gives the most to
+  compare.
+- Vagrant includes a `puppet` provisioner for masterless runs, and Ubuntu
+  24.04 packages Puppet, so nothing is installed on the Windows host, the
+  same constraint that led to `ansible_local`.
+- Chef was set aside because its binaries require accepting a commercial
+  licence, and Salt because its states are YAML and Jinja2, close enough to
+  Ansible that the comparison would teach less.
