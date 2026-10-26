@@ -26,6 +26,7 @@
   ansible.builtin.command: nginx -t
   register: nginx_config_test
   changed_when: false
+  check_mode: false
 
 - name: Enable and start nginx
   ansible.builtin.systemd_service:
