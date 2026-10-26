@@ -1,0 +1,8 @@
+---
+# Tools needed on every tier: curl and netcat for the health checks, ufw for
+# the firewall, acl so that Ansible can switch to unprivileged users.
+common_packages:
+  - curl
+  - netcat-openbsd
+  - ufw
+  - acl

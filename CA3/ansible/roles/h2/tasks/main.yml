@@ -1,0 +1,9 @@
+---
+- name: Install Java and the H2 engine
+  ansible.builtin.import_tasks: install.yml
+
+- name: Run H2 as a service
+  ansible.builtin.import_tasks: service.yml
+
+- name: Restrict the H2 port to the application tier
+  ansible.builtin.import_tasks: firewall.yml
