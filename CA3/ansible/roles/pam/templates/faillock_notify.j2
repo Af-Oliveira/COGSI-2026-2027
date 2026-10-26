@@ -1,0 +1,9 @@
+Name: Refuse logins of locked accounts (pam_faillock preauth, managed by Ansible)
+Default: yes
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite	pam_faillock.so preauth
+Account-Type: Primary
+Account:
+	required	pam_faillock.so

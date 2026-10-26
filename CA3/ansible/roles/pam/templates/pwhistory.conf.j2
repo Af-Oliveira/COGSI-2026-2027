@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# pam_pwhistory options, read by pam_pwhistory.so (common-password).
+# Old password hashes are kept in /etc/security/opasswd.
+
+# Number of previous passwords that cannot be reused.
+remember = {{ pam_pwhistory_remember }}
+{% if pam_enforce_for_root %}
+# Apply the history also when root sets the password.
+enforce_for_root
+{% endif %}
