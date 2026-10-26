@@ -24,6 +24,7 @@ the assignment.
 3. [Repository layout](#3-repository-layout)
 4. [Ansible provisioning](#4-ansible-provisioning)
 5. [Alternative solution - analysis and design](#5-alternative-solution---analysis-and-design)
+6. [Alternative solution - implementation](#6-alternative-solution---implementation)
 
 ---
 
@@ -82,6 +83,7 @@ CA3/
 │       ├── pam/         password policy, history and lockout
 │       ├── bookstore/   Bookstore on app
 │       └── nginx/       reverse proxy on proxy
+├── alternative/         the same environment configured with Puppet (section 6)
 └── keys/                SSH key pairs generated on the host (not versioned)
 ```
 
@@ -1172,3 +1174,251 @@ Puppet was chosen for the implementation:
 - Chef was set aside because its binaries require accepting a commercial
   licence, and Salt because its states are YAML and Jinja2, close enough to
   Ansible that the comparison would teach less.
+
+---
+
+## 6. Alternative solution - implementation
+
+> To achieve the requirements for the highest grade, implement one of the
+> alternative designs proposed in the previous item. Clearly identify any
+> requirements not covered by the implementation and justify the limitations
+
+The design of section 5.2 was implemented with **Puppet 8.4.0** (the
+`puppet-agent` package of Ubuntu 24.04) in masterless mode: Vagrant runs
+`puppet apply` on each machine. It lives in `CA3/alternative/` and uses other
+addresses (`.30`, `.31`, `.32`) and host port 8081, so it can run next to the
+Ansible environment.
+
+```text
+CA3/alternative/
+├── Vagrantfile               three machines, shell bootstrap + puppet provisioner
+└── puppet/
+    ├── hiera.yaml            Hiera: data separated from code (role of group_vars)
+    ├── data/
+    │   ├── common.yaml       addresses, ports, names
+    │   └── secrets.yaml      database password, devuser hash
+    ├── manifests/site.pp     one node block per tier (role of the plays)
+    └── modules/              one module per Ansible role
+        ├── cogsi_common/     packages, /etc/hosts, ufw (defined type ufw_rule)
+        ├── cogsi_users/      developers, devuser (Sensitive hash)
+        ├── cogsi_pam/        same option files and pam-auth-update profiles
+        ├── cogsi_h2/         H2 server, SQL health check
+        ├── cogsi_bookstore/  clone, build, service, HTTP health check
+        └── cogsi_nginx/      reverse proxy, forwarding health check
+```
+
+### 6.1. Running it
+
+```bash
+cd CA3/alternative
+APP_CPUS=1 vagrant up        # first run
+vagrant provision            # second run
+curl.exe -s http://localhost:8081/books
+```
+
+```ruby
+# CA3/alternative/Vagrantfile (excerpt)
+node.vm.provision "shell",
+  name: "install_puppet",
+  inline: "command -v puppet >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq puppet-agent >/dev/null; }; puppet --version"
+
+node.vm.provision "puppet" do |puppet|
+  puppet.manifests_path    = "puppet/manifests"
+  puppet.manifest_file     = "site.pp"
+  puppet.module_path       = "puppet/modules"
+  puppet.hiera_config_path = "puppet/hiera.yaml"
+  puppet.options = "--detailed-exitcodes --summarize"
+end
+```
+
+> Vagrant's `puppet` provisioner, like the `ansible` one, expects the tool to
+> exist in the guest; unlike `ansible_local` it cannot install it, so a
+> one-line shell provisioner installs it first. It is guarded by
+> `command -v`, so it is idempotent too.
+
+### 6.2. From roles to modules
+
+Each Ansible role became a module with a class of the same responsibility.
+The main differences found while writing them:
+
+```puppet
+# manifests/site.pp
+node /^app/ {
+  include cogsi_common
+  include cogsi_users
+  include cogsi_pam
+  include cogsi_bookstore
+
+  Class['cogsi_common'] -> Class['cogsi_users'] -> Class['cogsi_bookstore']
+}
+```
+
+> **Ordering is explicit.** Puppet does not apply resources in the order they
+> are written; the arrows and the `require`/`subscribe` parameters build the
+> dependency graph. In Ansible the order of the roles in the play is enough.
+
+```puppet
+# modules/cogsi_h2/manifests/init.pp (excerpt)
+file { $jar:
+  ensure         => file,
+  source         => "https://repo1.maven.org/maven2/com/h2database/h2/${version}/h2-${version}.jar",
+  checksum       => 'sha1',
+  checksum_value => $sha1,
+}
+
+service { 'h2':
+  ensure    => running,
+  enable    => true,
+  subscribe => [File[$jar], File['/etc/systemd/system/h2.service'], Exec['h2 daemon-reload']],
+}
+```
+
+> `subscribe` plays the role of `notify` + handler: the service restarts only
+> when the jar or the unit changed.
+
+**No resource types for Git or ufw.** The Puppet core has no Git or ufw
+types (they exist in Forge modules such as `vcsrepo`, not used here to keep
+the solution free of downloaded modules). Both are `exec` resources, made
+idempotent with `creates` and `unless`:
+
+```puppet
+# modules/cogsi_common/manifests/ufw_rule.pp (excerpt)
+define cogsi_common::ufw_rule (String $rule = $title) {
+  ...
+  exec { "ufw ${rule}":
+    command => "/usr/sbin/ufw ${rule}",
+    user    => 'root',
+    unless  => $check,     # e.g. ufw show added | grep -qxF 'ufw allow 22/tcp'
+  }
+}
+
+# modules/cogsi_bookstore/manifests/init.pp (excerpt)
+exec { 'build the jar':
+  command => "./gradlew --no-daemon --console=plain --quiet bootJar && ... && git rev-parse HEAD > build/.built-rev",
+  unless  => "test -f build/bookstore.jar && test \"$(cat build/.built-rev)\" = \"$(git rev-parse HEAD)\"",
+}
+```
+
+> The build records the commit it was made from and runs again only when the
+> clone moved, the same rule as the `when` of the Ansible build task.
+
+**Health checks as the `unless` of a failing command.** A Puppet `exec`
+that runs is always reported as a change, so a check written as a plain
+`exec` would make every run look non-idempotent. The check is therefore the
+`unless` of a command that only fails:
+
+```puppet
+exec { 'proxy health check':
+  command  => '/bin/echo "Nginx does not return the Bookstore response" >&2; /bin/false',
+  unless   => "/usr/local/sbin/proxy-health http://127.0.0.1 http://app:${app_port}",
+  provider => shell,
+}
+```
+
+> When the check passes nothing runs and nothing changes; when it fails the
+> run fails with the message. The retries (Ansible `until`/`retries`) are
+> loops inside the check scripts, because `tries` applies only to `command`,
+> not to `unless`. The three checks are the same as in Ansible: a SQL query
+> to H2, `/actuator/health` UP plus `/books`, and the response through Nginx
+> compared with the direct one.
+
+**Secrets.** The database password and the devuser hash are declared
+`Sensitive` and the health check credentials are in a root-only file:
+
+```console
+Notice: /Stage[main]/Cogsi_h2/File[/etc/h2-health.conf]/ensure: changed [redacted] to [redacted]
+Notice: /Stage[main]/Cogsi_users/User[devuser]/password: changed [redacted] to [redacted]
+```
+
+### 6.3. Two runs
+
+First run, number of resources changed per machine (`Changes: Total`):
+`db` 28, `app` 28, `proxy` 11. Second run, on the three machines:
+
+```console
+Notice: Applied catalog in 3.53 seconds
+Application:
+   Initial environment: production
+   Converged environment: production
+         Run mode: user
+Changes:
+Events:
+Resources:
+            Total: 44
+...
+Version:
+           Config: 1793042545
+           Puppet: 8.4.0
+```
+
+> An empty `Changes:` section means no resource changed (Puppet prints a
+> total only when there is one). `db` (39 resources) and `proxy` (25) gave the
+> same result. With `--detailed-exitcodes` the exit code is 0 for "no
+> changes" and 2 for "changes applied".
+
+From the host and the access tests on `app`:
+
+```console
+$ curl.exe -s http://localhost:8081/books
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"}]
+
+Short1!            -> BAD PASSWORD: The password is shorter than 12 characters
+abcdefghijklmn     -> BAD PASSWORD: The password contains less than 3 character classes
+Tulipa7Marte9Rio   -> (accepted)
+developers:x:1001:devuser,bookstore
+ls: cannot open directory '/opt/bookstore': Permission denied        # vagrant
+-rw-r----- 1 root developers 55806170 Oct 26 19:12 bookstore.jar     # devuser
+```
+
+With the Bookstore stopped, the proxy check fails the run:
+
+```console
+Notice: /Stage[main]/Cogsi_nginx/Exec[proxy health check]/returns: Nginx does not return the Bookstore response
+Error: '/bin/echo "Nginx does not return the Bookstore response" >&2; /bin/false' returned 1 instead of one of [0]
+```
+
+**Problems found.**
+
+| Problem | Cause | Fix |
+| --- | --- | --- |
+| `lookup() did not find a value for the name 'cogsi::hosts'` | Vagrant uploads `hiera.yaml` alone, without the `data/` folder next to it | `puppet/` shared with the guests, absolute `datadir` |
+| `ufw default ...` changed on every run | `/etc/default/ufw` stores `INPUT`/`DROP`, not `incoming`/`deny` | the check maps the names |
+| `ufw allow ... returned 1` on `app` | the resource default `Exec { user => 'bookstore' }` of the Bookstore class also applied to the `exec` of the `ufw_rule` type (dynamic scope) | `user => 'root'` in the type |
+| The node name was `db.tail885d5e.ts.net` | the DNS search domain of the host (Tailscale) reaches the guests through the host resolver | node blocks match with regular expressions (`/^db/`) |
+
+### 6.4. Requirements not covered and limitations
+
+| Requirement | Status in the Puppet implementation | Justification |
+| --- | --- | --- |
+| Static `hosts.ini` and `ansible-inventory --list` | Not applicable | Masterless Puppet has no inventory: each machine applies `site.pp` to itself and picks its `node` block. The mapping is the node blocks and the addresses in Hiera |
+| Secrets encrypted at rest (Ansible Vault) | **Not covered** | `data/secrets.yaml` is plain YAML. The equivalent, `hiera-eyaml`, needs an extra backend and key pair; it was left out to keep the guests with the distribution packages only. Output is still protected by `Sensitive` |
+| devuser password set only on creation | **Different behaviour** | The core `user` type has no `update_password: on_create`; Puppet re-applies the declared hash on every run, so a password changed by the user (or by the PAM history tests) is reverted and reported as a change |
+| Custom SSH key per machine (kept from CA2) | **Not covered** | The alternative keeps Vagrant's default behaviour, which already replaces the insecure key by a key generated per machine; the explicit role was not ported |
+| Retries of transient failures | Partly | Only `exec` has `tries`; package downloads have no retry. Health checks retry inside their scripts |
+| Git and firewall as declarative resources | Partly | Implemented with `exec` + `creates`/`unless`; the Forge modules `vcsrepo` and `puppetlabs-firewall` would give real resource types |
+| PAM, developers/devuser, permissions, H2, Bookstore, Nginx, health checks, idempotence | Covered | Same files, permissions and checks as the Ansible solution, verified above |
+
+### 6.5. Reflection on the differences
+
+- **Order.** Ansible applies tasks in the order written, which matched the
+  way the CA2 scripts were read and translated. Puppet needed every
+  dependency declared; the benefit is that an independent resource can never
+  wait for an unrelated one, and the cost is that a missing arrow is a bug
+  that may not show on every run.
+- **Language.** Puppet's class parameters are typed (`Sensitive[String]`,
+  `Hash[String, String]`) and checked when the catalogue is compiled, before
+  any change to the machine; Ansible variables are untyped and a wrong value
+  shows up only when the task that uses it runs.
+- **Coverage of the core.** Ansible ships modules for everything this
+  assignment needed (`git`, `ufw`, `uri`, `authorized_key`). The Puppet core
+  needed `exec` for Git, ufw and the HTTP checks, and each `exec` needs its
+  own idempotence guard; this is where most of the Puppet problems appeared.
+- **Idempotence reporting.** Both tools report changes per resource, but in
+  Puppet any `exec` that runs is a change, which forced the "check in
+  `unless`" pattern for health checks. In Ansible, `changed_when: false`
+  states it directly.
+- **Fit for the assignment.** For a push-based, one-off provisioning of a
+  laboratory environment from Vagrant, Ansible was simpler. Puppet's model
+  pays off with long-lived servers, where its agent re-applies the catalogue
+  periodically and corrects drift (such as the devuser password reset above)
+  without anyone running a command.

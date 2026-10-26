@@ -1,0 +1,13 @@
+---
+# Hiera: configuration data separated from the manifests (the role of
+# group_vars in the Ansible solution).
+version: 5
+defaults:
+  # Absolute path: Vagrant copies this file alone, outside the project folder.
+  datadir: /vagrant/puppet/data
+  data_hash: yaml_data
+hierarchy:
+  - name: "Secrets"
+    path: "secrets.yaml"
+  - name: "Common"
+    path: "common.yaml"

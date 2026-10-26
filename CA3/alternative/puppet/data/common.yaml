@@ -1,0 +1,14 @@
+---
+# Topology of the alternative environment (same tiers as the Ansible one, on
+# other addresses so that both environments can run side by side).
+cogsi::hosts:
+  db: 192.168.56.32
+  app: 192.168.56.31
+  proxy: 192.168.56.30
+cogsi::h2_port: 9092
+cogsi::app_port: 8080
+
+cogsi::db_name: bookstore
+cogsi::db_user: bookstore
+cogsi::developers_group: developers
+cogsi::devuser: devuser
