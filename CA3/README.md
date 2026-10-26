@@ -25,6 +25,8 @@ the assignment.
 4. [Ansible provisioning](#4-ansible-provisioning)
 5. [Alternative solution - analysis and design](#5-alternative-solution---analysis-and-design)
 6. [Alternative solution - implementation](#6-alternative-solution---implementation)
+7. [Operative guidelines and team work](#7-operative-guidelines-and-team-work)
+8. [References](#8-references)
 
 ---
 
@@ -41,7 +43,10 @@ machine with shell scripts:
 
 CA3 keeps the machines, the addresses and the network, and replaces every
 shell provisioner with Ansible. Vagrant still creates the virtual machines;
-Ansible describes the desired state of each one.
+Ansible describes the desired state of each one, adds a password policy,
+a developers group with restricted directories and application-level health
+checks, and proves that a second run changes nothing. The same environment is
+also configured with Puppet, the alternative tool, in `CA3/alternative/`.
 
 ---
 
@@ -1422,3 +1427,116 @@ Error: '/bin/echo "Nginx does not return the Bookstore response" >&2; /bin/false
   pays off with long-lived servers, where its agent re-applies the catalogue
   periodically and corrects drift (such as the devuser password reset above)
   without anyone running a command.
+
+---
+
+## 7. Operative guidelines and team work
+
+> Use your own group's private repository. Create a folder for each class
+> assignment in the root of your repository [...] Continue to operate Git via
+> the command line. Create a branch for each feature and merge the completed
+> feature into main [...] Create issue(s) in GitHub for your main tasks [...]
+> Make several commits while you work (incremental, descriptive commit
+> messages)
+
+**Folder.** Everything specific to CA3 is in `CA3/`. The Bookstore is not
+copied again: the `app` machine clones the group repository and builds
+`CA1/part2`, the Gradle version imported in CA1 without the history of the
+original repository.
+
+**Planning.** The assignment was planned as a sprint on the group's GitHub
+project: a milestone (`Sprint 3 - CA3 Configuration Management`), labels by
+family (`sprint: CA3`, `component: ansible`, `area: pam`, `area: users`,
+`area: health-checks`, ...), three epics and ten stories attached to their
+epic as sub-issues. Each story was assigned to one member, who authored its
+commits; the other member reviewed it and is co-author.
+
+```bash
+# example: a story created with its labels, milestone and assignee
+gh issue create --title "Enforce the PAM password policy, history and lockout on app and db" \
+  --milestone "Sprint 3 - CA3 Configuration Management" \
+  --label "sprint: CA3" --label "component: ansible" --label "area: pam" \
+  --assignee rmotafreitas --body-file story.md
+```
+
+| Issue | Story | Owner | Branch | Pull request |
+| --- | --- | --- | --- | --- |
+| #46 | Vagrant, `ansible_local`, static inventory | Afonso | `feature/ca3-ansible-scaffold` | #56 |
+| #47 | `common` and `h2` roles | Afonso | `feature/ca3-ansible-db` | #57, #58 |
+| #48 | `bookstore` role, Vault, app and db health checks | Afonso | `feature/ca3-ansible-app` | #59 |
+| #49 | `nginx` role and forwarding check | Ricardo | `feature/ca3-ansible-proxy` | #60 |
+| #50 | PAM policy, history and lockout | Ricardo | `feature/ca3-pam-policy` | #62 |
+| #51 | `developers`, `devuser`, restricted directories | Ricardo | `feature/ca3-users-permissions` | #61 |
+| #52 | Idempotence evidence and check mode | Afonso | `feature/ca3-idempotence` | #63 |
+| #53 | Alternatives: analysis and design | Ricardo | `docs/ca3-alternative-analysis` | #64 |
+| #54 | Alternative implemented with Puppet | Afonso | `feature/ca3-alternative-puppet` | #65 |
+| #55 | Report, self-evaluation and tag `ca3` | Afonso | `docs/ca3-report` | this one |
+
+> PR #57 was merged into the branch of #56 after that branch had already
+> reached `main`, so its commits did not reach `main`; PR #58 brought them in.
+
+**Commits.** Every commit references its issue (`Refs #N`, and `Closes #N` in
+the last one, which closes the issue when the pull request is merged), and
+names the reviewer with a `Co-authored-by` trailer:
+
+```bash
+git log --format='%h %an | %s' --no-merges -- CA3 | head -4
+```
+
+```console
+99d0f56 Afonso Guilherme Vieira da Silva Oliveira | docs(ca3): document the Puppet implementation, its limits and the differences
+96e2728 Afonso Guilherme Vieira da Silva Oliveira | feat(ca3): port the h2, bookstore and nginx roles to Puppet modules
+03e31ea Afonso Guilherme Vieira da Silva Oliveira | feat(ca3): port the common, users and pam roles to Puppet modules
+2772b30 Afonso Guilherme Vieira da Silva Oliveira | feat(ca3): create the Puppet environment with masterless Vagrant provisioning
+```
+
+### 7.1. Self-evaluation
+
+> Include a self-evaluation for each team member on a 0 - 100% scale
+> representing their contribution
+
+| Team member | Contribution |
+| --- | --- |
+| Afonso Oliveira (`Af-Oliveira`) | 50% |
+| Ricardo Freitas (`rmotafreitas`) | 50% |
+
+The stories were split evenly between the two members (table above), and
+each one reviewed the work of the other before it was merged.
+
+### 7.2. Tag
+
+> At the end of the assignment mark your commit with the tag ca3
+
+```bash
+# on main, after the pull request of this report was merged
+git tag -a ca3 -m "CA3: configuration management with Ansible and Puppet alternative"
+git push origin ca3
+```
+
+---
+
+## 8. References
+
+- Ansible documentation - Installation guide, playbooks, roles, inventory,
+  variables precedence: <https://docs.ansible.com/ansible/latest/>
+- Ansible Vault: <https://docs.ansible.com/ansible/latest/vault_guide/index.html>
+- Vagrant - Ansible Local provisioner:
+  <https://developer.hashicorp.com/vagrant/docs/provisioning/ansible_local>
+- Vagrant - Puppet Apply provisioner:
+  <https://developer.hashicorp.com/vagrant/docs/provisioning/puppet_apply>
+- `pam_pwquality(8)`, `pwquality.conf(5)`, `pam_pwhistory(8)`,
+  `pam_faillock(8)`, `faillock.conf(5)`, `pam-auth-update(8)` - Ubuntu 24.04
+  manual pages: <https://manpages.ubuntu.com/>
+- Red Hat - Configuring user authentication using authselect:
+  <https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/configuring_authentication_and_authorization_in_rhel/configuring-user-authentication-using-authselect_configuring-authentication-and-authorization-in-rhel>
+- Puppet language reference (resources, relationships, `Sensitive`, Hiera):
+  <https://www.puppet.com/docs/puppet/8/puppet_index.html>
+- Chef Infra - accepting the license: <https://docs.chef.io/licensing/accept/>
+- Salt - state system and requisites: <https://docs.saltproject.io/en/latest/>
+- The New Stack - OpenVox, the community-driven fork of Puppet:
+  <https://thenewstack.io/openvox-the-community-driven-fork-of-puppet-has-arrived/>
+- Vox Pupuli - An unsupportable path: <https://dev.to/voxpupuli/an-unsupportable-path-3i5h>
+- Spring Boot Actuator - health endpoint:
+  <https://docs.spring.io/spring-boot/reference/actuator/endpoints.html>
+- COGSI course material: T8, T8b, T8c (Configuration Management), TP8 and the
+  CA3 assignment.
