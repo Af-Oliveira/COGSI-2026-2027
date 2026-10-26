@@ -5,6 +5,5 @@
 # SSH key pairs generated for each machine. Private keys are secrets.
 keys/
 
-# Ansible artefacts: retry files and the local Vault password file.
+# Ansible retry files.
 *.retry
-ansible/.vault_pass

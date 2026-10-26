@@ -1,0 +1,31 @@
+---
+# An open port only proves that something listens. The check runs a real SQL
+# statement through the H2 TCP server, with the Bookstore credentials, so it
+# fails if the engine does not answer queries or rejects the login.
+- name: Query H2 through its TCP server
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/java
+      - -cp
+      - "{{ h2_jar }}"
+      - org.h2.tools.Shell
+      - -url
+      - "jdbc:h2:tcp://127.0.0.1:{{ h2_port }}/./{{ db_name }}"
+      - -user
+      - "{{ db_user }}"
+      - -password
+      - "{{ db_password }}"
+      - -sql
+      - "SELECT H2VERSION() AS VERSION"
+  register: h2_health
+  changed_when: false
+  failed_when: h2_health.rc != 0 or h2_version not in h2_health.stdout
+  until: h2_health is succeeded
+  retries: 5
+  delay: 3
+  # The command line contains the database password.
+  no_log: true
+
+- name: Report the H2 health check
+  ansible.builtin.debug:
+    msg: "H2 answered SELECT H2VERSION() on port {{ h2_port }}: {{ h2_health.stdout_lines | select('search', h2_version) | first | trim }}"

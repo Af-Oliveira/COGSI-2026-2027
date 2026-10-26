@@ -1,0 +1,58 @@
+---
+# The clone is updated only when the branch moved; the build runs only when the
+# source changed or no jar was produced yet. A second run therefore neither
+# rebuilds nor redeploys.
+- name: Clone the group repository ({{ bookstore_repo_version }})
+  ansible.builtin.git:
+    repo: "{{ bookstore_repo_url }}"
+    dest: "{{ bookstore_src_dir }}"
+    version: "{{ bookstore_repo_version }}"
+    depth: 1
+  become: true
+  become_user: "{{ bookstore_user }}"
+  register: bookstore_repo
+  until: bookstore_repo is succeeded
+  retries: 3
+  delay: 10
+
+- name: Look for a jar from a previous build
+  ansible.builtin.find:
+    paths: "{{ bookstore_src_dir }}/{{ bookstore_project_dir }}/build/libs"
+    patterns: "bookstore-*.jar"
+    excludes: "*-plain.jar"
+  register: bookstore_built_jar
+
+- name: Build the jar with the Gradle Wrapper
+  ansible.builtin.command:
+    cmd: ./gradlew --no-daemon --console=plain bootJar
+    chdir: "{{ bookstore_src_dir }}/{{ bookstore_project_dir }}"
+  become: true
+  become_user: "{{ bookstore_user }}"
+  when: bookstore_repo is changed or bookstore_built_jar.matched == 0
+  changed_when: true
+
+- name: Find the jar to deploy
+  ansible.builtin.find:
+    paths: "{{ bookstore_src_dir }}/{{ bookstore_project_dir }}/build/libs"
+    patterns: "bookstore-*.jar"
+    excludes: "*-plain.jar"
+  register: bookstore_built_jar
+  failed_when: bookstore_built_jar.matched != 1
+
+- name: Create the application directory
+  ansible.builtin.file:
+    path: "{{ bookstore_app_dir }}"
+    state: directory
+    owner: root
+    group: "{{ bookstore_user }}"
+    mode: "0750"
+
+- name: Deploy the jar
+  ansible.builtin.copy:
+    src: "{{ bookstore_built_jar.files[0].path }}"
+    dest: "{{ bookstore_app_dir }}/bookstore.jar"
+    remote_src: true
+    owner: root
+    group: "{{ bookstore_user }}"
+    mode: "0640"
+  notify: Restart bookstore

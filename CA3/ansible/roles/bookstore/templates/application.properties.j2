@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+
+# H2 in server mode: the application is a JDBC client of the engine that runs
+# on the db machine. "./{{ db_name }}" is relative to the base directory of the server.
+spring.datasource.url=jdbc:h2:tcp://{{ bookstore_db_host }}:{{ h2_port }}/./{{ db_name }}
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username={{ db_user }}
+spring.datasource.password={{ db_password }}
+
+# Keep the existing schema and rows between executions.
+spring.jpa.hibernate.ddl-auto=update
+
+server.port={{ app_port }}
+
+# The SQL trace is useful in the IDE but floods the service journal.
+spring.jpa.show-sql=false

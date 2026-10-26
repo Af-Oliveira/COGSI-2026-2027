@@ -1,0 +1,23 @@
+#!/bin/bash
+# Managed by Ansible (role bookstore) - manual changes are overwritten.
+#
+# Usage: wait-for-port <host> <port> [timeout in seconds]
+# Succeeds as soon as a TCP connection to host:port is accepted; fails when the
+# timeout expires, so that the service depending on it is not started.
+set -u
+
+host=${1:?host is required}
+port=${2:?port is required}
+timeout=${3:-60}
+
+for ((elapsed = 0; elapsed < timeout; elapsed += 2)); do
+    if nc -z -w 2 "$host" "$port" 2>/dev/null; then
+        echo "$host:$port is accepting connections (after ${elapsed}s)."
+        exit 0
+    fi
+    echo "Waiting for $host:$port (${elapsed}s of ${timeout}s)..."
+    sleep 2
+done
+
+echo "$host:$port is not reachable after ${timeout}s - giving up." >&2
+exit 1
