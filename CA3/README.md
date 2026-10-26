@@ -58,7 +58,8 @@ also configured with Puppet, the alternative tool, in `CA3/alternative/`.
 | Vagrant | 2.4.9 | |
 | VirtualBox | 7.2.20 | |
 | Box | `bento/ubuntu-24.04` `202510.26.0` | Same pinned box as CA2 |
-| Ansible | installed inside each guest by Vagrant | see [section 4.1](#41-running-ansible-from-a-windows-host) |
+| Ansible | ansible-core 2.21.5, installed inside each guest by Vagrant | see [section 4.1](#41-running-ansible-from-a-windows-host) |
+| Puppet (alternative) | 8.4.0, `puppet-agent` package of Ubuntu 24.04 | see [section 6](#6-alternative-solution---implementation) |
 
 > On this host VirtualBox runs on top of Hyper-V, and a guest with two virtual
 > CPUs froze under the Gradle build in CA2. The `app` machine is therefore
@@ -1091,6 +1092,84 @@ proxy                      : ok=19   changed=0    unreachable=0    failed=0    s
 > remains a preview: a task that depends on a change made earlier in the
 > same run (for example, a service started by a new unit file) cannot be
 > fully validated.
+
+### 4.13. Validating and running parts of the playbook
+
+Before a run, `--syntax-check` parses the playbook, the roles and the
+templates without connecting to any machine:
+
+```bash
+vagrant ssh app -c 'cd /vagrant/ansible && ansible-playbook site.yml --syntax-check'
+```
+
+```console
+playbook: site.yml
+```
+
+Every role has a tag with its own name, so a single concern can be listed,
+checked or applied alone, which is how the PAM role was re-applied while it
+was being tested:
+
+```yaml
+# ansible/site.yml (excerpt)
+- name: Developers, access control and password policy on app and db
+  hosts: dbservers:appservers
+  become: true
+  roles:
+    - { role: users, tags: [users] }
+    - { role: pam, tags: [pam] }
+```
+
+```bash
+vagrant ssh app -c 'cd /vagrant/ansible && ansible-playbook site.yml --list-tags'
+vagrant ssh app -c 'cd /vagrant/ansible && ansible-playbook site.yml --limit app --tags pam --vault-password-file .vault_pass'
+```
+
+```console
+  play #1 (all): Baseline of every machine	TAGS: []
+      TASK TAGS: [common, ssh_access]
+  play #2 (dbservers:appservers): Developers, access control and password policy on app and db	TAGS: []
+      TASK TAGS: [pam, users]
+  play #3 (dbservers): Database tier	TAGS: []
+      TASK TAGS: [h2]
+  play #4 (appservers): Application tier	TAGS: []
+      TASK TAGS: [bookstore]
+  play #5 (proxyservers): Proxy tier	TAGS: []
+      TASK TAGS: [nginx]
+
+TASK [pam : Check the order of the modules] ************************************
+ok: [app] => {
+    "msg": "auth: faillock preauth > pam_unix > faillock authfail; account: faillock > pam_unix; password: pwquality > pwhistory > pam_unix"
+}
+PLAY RECAP *********************************************************************
+app                        : ok=12   changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+```
+
+> - Only the 10 tasks of the `pam` role ran (plus fact gathering);
+>   `--list-tasks` shows the selection before running it.
+> - `--start-at-task "<task name>"` resumes a run from a given task; it was
+>   not needed, because a tag selects a whole role.
+
+**Why the modules are idempotent and `command`/`shell` are not.** A module
+such as `apt`, `user`, `file` or `template` first reads the current state
+(installed packages, the user in `/etc/passwd`, the mode and content of the
+file), compares it with the arguments, and acts only when they differ; it
+reports `changed` only in that case. `command` and `shell` cannot know what a
+command does, so they run it every time and report `changed` every time. In
+this playbook they are used only where no module exists, and each one is
+guarded:
+
+| Task | Guard |
+| --- | --- |
+| Gradle build | `when:` the clone changed or no jar exists |
+| `pam-auth-update` | `when:` a profile changed or a module is missing from the stack |
+| `nginx -t`, `getent group`, H2 SQL check | `changed_when: false` (they only read) |
+
+**Privilege escalation.** `become: true` is set per play because nearly every
+task installs packages or writes system files. The two tasks that must not
+run as root, the clone and the Gradle build, switch to the unprivileged
+`bookstore` account with `become_user`, so the source and the Gradle caches
+are owned by the service account and no build tool runs as root.
 
 ---
 
