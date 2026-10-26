@@ -1,0 +1,14 @@
+#!/bin/bash
+# Managed by Puppet (cogsi_nginx).
+# Usage: proxy-health <proxy URL> <app URL>
+# Succeeds when /books through Nginx returns a non-empty list identical to the
+# one returned directly by the Bookstore; retries for up to 30 seconds.
+set -u
+proxy=${1:?proxy URL is required}
+app=${2:?app URL is required}
+for _ in $(seq 1 10); do
+    through=$(curl -fsS "$proxy/books" 2>/dev/null) && direct=$(curl -fsS "$app/books" 2>/dev/null) &&
+        [ -n "$through" ] && [ "$through" != "[]" ] && [ "$through" = "$direct" ] && exit 0
+    sleep 3
+done
+exit 1

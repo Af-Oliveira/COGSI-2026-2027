@@ -1,0 +1,19 @@
+<%- | Integer $h2_port | -%>
+# Managed by Puppet (cogsi_bookstore) - manual changes are overwritten.
+[Unit]
+Description=Bookstore Spring Boot application (COGSI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bookstore
+WorkingDirectory=/opt/bookstore
+ExecStartPre=/usr/local/bin/wait-for-port db <%= $h2_port %> 60
+ExecStart=/usr/bin/java -jar /opt/bookstore/bookstore.jar --spring.config.additional-location=file:/etc/bookstore/
+TimeoutStartSec=120
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
