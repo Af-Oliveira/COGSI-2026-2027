@@ -44,7 +44,7 @@
     path: "{{ bookstore_app_dir }}"
     state: directory
     owner: root
-    group: "{{ bookstore_user }}"
+    group: "{{ bookstore_app_group }}"
     mode: "0750"
 
 - name: Deploy the jar
@@ -53,6 +53,6 @@
     dest: "{{ bookstore_app_dir }}/bookstore.jar"
     remote_src: true
     owner: root
-    group: "{{ bookstore_user }}"
+    group: "{{ bookstore_app_group }}"
     mode: "0640"
   notify: Restart bookstore

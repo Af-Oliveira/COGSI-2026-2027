@@ -11,6 +11,8 @@ bookstore_home: /var/lib/bookstore
 bookstore_src_dir: "{{ bookstore_home }}/src"
 bookstore_app_dir: /opt/bookstore
 bookstore_config_dir: /etc/bookstore
+# Group that may read the deployed application.
+bookstore_app_group: "{{ developers_group }}"
 
 # Address of the H2 server: the first (and only) machine of dbservers.
 bookstore_db_host: "{{ groups['dbservers'] | first }}"

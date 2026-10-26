@@ -9,6 +9,9 @@ h2_install_dir: /opt/h2
 h2_jar: "{{ h2_install_dir }}/h2-{{ h2_version }}.jar"
 h2_data_dir: /var/lib/h2
 h2_user: h2
+# Group that owns the database files: the developers may read them, other
+# users may not.
+h2_data_group: "{{ developers_group }}"
 h2_port: 9092
 
 # Only the application tier may open a connection to the database port.
