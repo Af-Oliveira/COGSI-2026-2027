@@ -1,35 +1,42 @@
 ---
 # Entry point of the Ansible provisioning. Vagrant runs it once per machine,
 # limited to that machine, in the order db, app, proxy.
+#
+# Every role has a tag with its own name, so one concern can be applied or
+# checked alone, for example: ansible-playbook site.yml --tags pam
+#
+# become is set per play: almost every task installs packages or writes
+# system files. The tasks that must not run as root (clone and build of the
+# Bookstore) switch to the service account with become_user.
 
 - name: Baseline of every machine
   hosts: all
   become: true
   roles:
-    - ssh_access
-    - common
+    - { role: ssh_access, tags: [ssh_access] }
+    - { role: common, tags: [common] }
 
 - name: Developers, access control and password policy on app and db
   hosts: dbservers:appservers
   become: true
   roles:
-    - users
-    - pam
+    - { role: users, tags: [users] }
+    - { role: pam, tags: [pam] }
 
 - name: Database tier
   hosts: dbservers
   become: true
   roles:
-    - h2
+    - { role: h2, tags: [h2] }
 
 - name: Application tier
   hosts: appservers
   become: true
   roles:
-    - bookstore
+    - { role: bookstore, tags: [bookstore] }
 
 - name: Proxy tier
   hosts: proxyservers
   become: true
   roles:
-    - nginx
+    - { role: nginx, tags: [nginx] }
