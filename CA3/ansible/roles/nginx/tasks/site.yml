@@ -1,0 +1,37 @@
+---
+- name: Write the {{ nginx_site_name }} site
+  ansible.builtin.template:
+    src: bookstore.conf.j2
+    dest: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable the {{ nginx_site_name }} site
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+    dest: "/etc/nginx/sites-enabled/{{ nginx_site_name }}"
+    state: link
+  notify: Reload nginx
+
+- name: Disable the default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+# A broken configuration must stop the run before Nginx is reloaded with it.
+- name: Validate the Nginx configuration
+  ansible.builtin.command: nginx -t
+  register: nginx_config_test
+  changed_when: false
+
+- name: Enable and start nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Apply pending reloads
+  ansible.builtin.meta: flush_handlers

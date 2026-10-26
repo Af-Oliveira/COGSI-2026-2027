@@ -1,0 +1,6 @@
+---
+# Upstream: the Bookstore on the first (and only) machine of appservers.
+nginx_upstream_host: "{{ groups['appservers'] | first }}"
+nginx_upstream_port: "{{ app_port }}"
+nginx_listen_port: 80
+nginx_site_name: bookstore
