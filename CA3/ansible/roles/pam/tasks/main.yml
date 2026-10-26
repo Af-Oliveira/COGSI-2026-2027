@@ -1,0 +1,9 @@
+---
+- name: Install and configure the PAM modules
+  ansible.builtin.import_tasks: modules.yml
+
+- name: Add the modules to the PAM stack
+  ansible.builtin.import_tasks: stack.yml
+
+- name: Check the resulting PAM stack
+  ansible.builtin.import_tasks: verify.yml

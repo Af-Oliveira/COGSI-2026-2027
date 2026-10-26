@@ -1,0 +1,25 @@
+---
+# Password quality (pam_pwquality): at least 12 characters and at least three
+# of the four classes (lower, upper, digit, other). minclass=3 accepts any
+# three classes; the four *credit=-1 options would require all four.
+pam_pwquality_minlen: 12
+pam_pwquality_minclass: 3
+pam_pwquality_retry: 3
+
+# Password history (pam_pwhistory): refuse the last five passwords.
+pam_pwhistory_remember: 5
+
+# Account lockout (pam_faillock): five consecutive failures lock the account
+# for ten minutes.
+pam_faillock_deny: 5
+pam_faillock_unlock_time: 600
+pam_faillock_fail_interval: 900
+
+# The policies also apply when root sets a password (chpasswd, passwd <user>).
+pam_enforce_for_root: true
+
+# pam-auth-update profiles written by this role, enabled after the stock ones.
+pam_profiles:
+  - pwhistory
+  - faillock
+  - faillock_notify

@@ -9,11 +9,12 @@
     - ssh_access
     - common
 
-- name: Developers and access control on app and db
+- name: Developers, access control and password policy on app and db
   hosts: dbservers:appservers
   become: true
   roles:
     - users
+    - pam
 
 - name: Database tier
   hosts: dbservers
