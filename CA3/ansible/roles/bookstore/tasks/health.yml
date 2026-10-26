@@ -1,0 +1,32 @@
+---
+# Spring Boot reports UP only when its own health indicators pass, including
+# the datasource: a status of UP means that the application reached H2.
+- name: Wait for the Bookstore to report UP
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/actuator/health"
+    return_content: true
+  register: bookstore_health
+  until: bookstore_health.status == 200 and (bookstore_health.json.status | default('')) == 'UP'
+  retries: "{{ (bookstore_startup_timeout / 5) | int }}"
+  delay: 5
+
+# Application-level check: the REST API returns the books stored in H2, a JSON
+# list in which every entry has a title.
+- name: Request the book collection
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/books"
+    return_content: true
+  register: bookstore_books
+  failed_when: >-
+    bookstore_books.status != 200 or
+    bookstore_books.json is not defined or
+    bookstore_books.json is not sequence or
+    bookstore_books.json | length == 0 or
+    bookstore_books.json | rejectattr('title', 'defined') | list | length > 0
+
+- name: Report the Bookstore health check
+  ansible.builtin.debug:
+    msg: >-
+      /actuator/health is {{ bookstore_health.json.status }};
+      /books returned HTTP {{ bookstore_books.status }} with
+      {{ bookstore_books.json | length }} book(s), first "{{ bookstore_books.json[0].title }}"

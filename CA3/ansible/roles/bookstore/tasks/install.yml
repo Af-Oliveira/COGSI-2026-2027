@@ -1,0 +1,21 @@
+---
+- name: Install Git and JDK 21
+  ansible.builtin.apt:
+    name:
+      - git
+      - openjdk-21-jdk-headless
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: bookstore_apt
+  until: bookstore_apt is succeeded
+  retries: 5
+  delay: 10
+
+- name: Create the bookstore service account
+  ansible.builtin.user:
+    name: "{{ bookstore_user }}"
+    system: true
+    home: "{{ bookstore_home }}"
+    create_home: true
+    shell: /usr/sbin/nologin

@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Bookstore Spring Boot application (COGSI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ bookstore_user }}
+WorkingDirectory={{ bookstore_app_dir }}
+# Health check: the application is only launched once the H2 TCP port answers.
+ExecStartPre=/usr/local/bin/wait-for-port {{ bookstore_db_host }} {{ h2_port }} 60
+ExecStart=/usr/bin/java -jar {{ bookstore_app_dir }}/bookstore.jar --spring.config.additional-location=file:{{ bookstore_config_dir }}/
+TimeoutStartSec=120
+# The JVM exits with 143 when it is stopped with SIGTERM.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+---
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: "{{ bookstore_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ bookstore_user }}"
+    mode: "0750"
+
+# The file holds the database password: readable only by root and the service
+# account, and the task output is hidden.
+- name: Write application.properties
+  ansible.builtin.template:
+    src: application.properties.j2
+    dest: "{{ bookstore_config_dir }}/application.properties"
+    owner: root
+    group: "{{ bookstore_user }}"
+    mode: "0640"
+  notify: Restart bookstore
+  no_log: true
+
+- name: Install the wait-for-port health check
+  ansible.builtin.copy:
+    src: wait-for-port
+    dest: /usr/local/bin/wait-for-port
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart bookstore
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: bookstore.service.j2
+    dest: /etc/systemd/system/bookstore.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart bookstore
+
+- name: Enable and start bookstore
+  ansible.builtin.systemd_service:
+    name: bookstore
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers

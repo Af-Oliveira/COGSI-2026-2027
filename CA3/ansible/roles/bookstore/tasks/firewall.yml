@@ -1,0 +1,9 @@
+---
+- name: Allow port {{ app_port }} only from the proxy tier
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_ip: "{{ ansible_host }}"
+    port: "{{ app_port | string }}"
+    proto: tcp
+  loop: "{{ bookstore_allowed_clients }}"

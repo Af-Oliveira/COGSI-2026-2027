@@ -1,0 +1,22 @@
+---
+# Source of the Gradle version of the Bookstore (CA1 Part 2).
+bookstore_repo_url: https://github.com/Af-Oliveira/COGSI-2026-2027.git
+bookstore_repo_version: main
+bookstore_project_dir: CA1/part2
+
+# Dedicated, unprivileged service account. Its home keeps the clone and the
+# Gradle caches; the deployed application lives in bookstore_app_dir.
+bookstore_user: bookstore
+bookstore_home: /var/lib/bookstore
+bookstore_src_dir: "{{ bookstore_home }}/src"
+bookstore_app_dir: /opt/bookstore
+bookstore_config_dir: /etc/bookstore
+
+# Address of the H2 server: the first (and only) machine of dbservers.
+bookstore_db_host: "{{ groups['dbservers'] | first }}"
+
+# Only the proxy tier may reach the application port.
+bookstore_allowed_clients: "{{ groups['proxyservers'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+# Seconds the health check waits for the application to answer.
+bookstore_startup_timeout: 240
