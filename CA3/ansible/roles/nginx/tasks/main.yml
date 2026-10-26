@@ -1,0 +1,12 @@
+---
+- name: Install Nginx
+  ansible.builtin.import_tasks: install.yml
+
+- name: Configure the reverse proxy site
+  ansible.builtin.import_tasks: site.yml
+
+- name: Open the HTTP port
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Check that Nginx forwards to the Bookstore
+  ansible.builtin.import_tasks: health.yml

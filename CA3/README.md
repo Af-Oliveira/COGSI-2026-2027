@@ -69,12 +69,16 @@ CA3/
 │   ├── ansible.cfg      project configuration (inventory, roles path)
 │   ├── hosts.ini        static inventory: one group per tier
 │   ├── site.yml         playbook: a baseline play and one play per tier
-│   ├── group_vars/
-│   │   └── all.yml      ports shared by every tier
+│   ├── group_vars/all/
+│   │   ├── main.yml     ports and database settings shared by every tier
+│   │   └── vault.yml    database password, encrypted with Ansible Vault
+│   ├── .vault_pass      Ansible Vault password (see section 4.7)
 │   └── roles/
 │       ├── ssh_access/  custom SSH key per machine
 │       ├── common/      packages, /etc/hosts, firewall baseline
-│       └── h2/          H2 server on db
+│       ├── h2/          H2 server on db
+│       ├── bookstore/   Bookstore on app
+│       └── nginx/       reverse proxy on proxy
 └── keys/                SSH key pairs generated on the host (not versioned)
 ```
 
@@ -646,3 +650,82 @@ VirtualBox had relayed at boot (`192.168.1.254` and an IPv6 resolver), which
 no longer answered. The `Vagrantfile` now sets
 `vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]`, so the guests
 resolve names through the Windows host.
+
+### 4.9. Nginx on proxy and the forwarding health check
+
+> Use Ansible to deploy and configure Nginx on the proxy VM as a reverse proxy
+> for the Bookstore application running on the app VM [...] On proxy, confirm
+> that Nginx responds successfully and correctly forwards requests to the
+> Bookstore application running on app
+
+The `nginx` role replaces `proxy.sh`. The CA2 site becomes the template
+`roles/nginx/templates/bookstore.conf.j2`; the upstream is the first host of
+`appservers` and its port the shared `app_port`.
+
+```yaml
+# ansible/roles/nginx/tasks/site.yml (excerpt)
+- name: Write the {{ nginx_site_name }} site
+  ansible.builtin.template:
+    src: bookstore.conf.j2
+    dest: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+  notify: Reload nginx
+
+- name: Validate the Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+```
+
+> - The site, its link in `sites-enabled` and the removal of the default site
+>   all notify the handler `Reload nginx`, so Nginx is reloaded once, and
+>   only when one of them changed.
+> - `nginx -t` runs before the handlers are flushed: a broken template fails
+>   the run instead of being loaded. It never changes anything, hence
+>   `changed_when: false`.
+
+A `200` from Nginx would not prove that it reaches the Bookstore, so the
+health check compares the answer obtained through the proxy with the answer
+obtained directly from `app`:
+
+```yaml
+# ansible/roles/nginx/tasks/health.yml (excerpt)
+- name: Check that Nginx returned the Bookstore response
+  ansible.builtin.assert:
+    that:
+      - nginx_books.json == nginx_upstream_books.json
+```
+
+```console
+TASK [nginx : Check that Nginx returned the Bookstore response] ****************
+ok: [proxy] => {
+    "msg": "Nginx on port 80 forwards to app:8080: 2 book(s), same as the direct request"
+}
+
+PLAY RECAP *********************************************************************
+proxy                      : ok=20   changed=6    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+The second run reports `proxy : ok=19 changed=0`. From the host, the proxy is
+the entry point of the environment:
+
+```bash
+curl.exe -s http://localhost:8080/books
+```
+
+```console
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"}]
+```
+
+The check was also run with the Bookstore stopped on `app`, to confirm that it
+detects a proxy that answers but cannot forward:
+
+```bash
+vagrant ssh app -c 'sudo systemctl stop bookstore'
+vagrant provision proxy
+```
+
+```console
+FAILED - RETRYING: [proxy]: nginx : Request the books through Nginx (9 retries left).
+...
+fatal: [proxy]: FAILED! => {"attempts": 10, "changed": false, "content": "<html>\r\n<head><title>502 Bad Gateway</title></head> ...
+proxy                      : ok=16   changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0
+```

@@ -20,3 +20,9 @@
   become: true
   roles:
     - bookstore
+
+- name: Proxy tier
+  hosts: proxyservers
+  become: true
+  roles:
+    - nginx
