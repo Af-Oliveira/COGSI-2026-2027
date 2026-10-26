@@ -1,0 +1,13 @@
+---
+# On the first boot unattended-upgrades may hold the dpkg lock for a while, and
+# the mirrors may fail transiently: the task is retried instead of failing.
+- name: Install {{ common_packages | join(', ') }}
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: common_apt
+  until: common_apt is succeeded
+  retries: 5
+  delay: 10
