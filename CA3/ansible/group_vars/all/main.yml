@@ -3,3 +3,9 @@
 # inventory, so the topology is defined in a single place.
 h2_port: 9092
 app_port: 8080
+
+# Credentials of the Bookstore database. The password is kept encrypted with
+# Ansible Vault in vault.yml and only referenced here.
+db_name: bookstore
+db_user: bookstore
+db_password: "{{ vault_db_password }}"
