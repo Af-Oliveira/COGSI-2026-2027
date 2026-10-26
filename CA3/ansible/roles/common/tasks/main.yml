@@ -1,0 +1,9 @@
+---
+- name: Install the common packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Make the machines resolvable by name
+  ansible.builtin.import_tasks: hosts.yml
+
+- name: Close the firewall except for SSH
+  ansible.builtin.import_tasks: firewall.yml

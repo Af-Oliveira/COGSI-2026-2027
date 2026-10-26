@@ -68,9 +68,13 @@ CA3/
 ├── ansible/             synced to /vagrant/ansible in every guest
 │   ├── ansible.cfg      project configuration (inventory, roles path)
 │   ├── hosts.ini        static inventory: one group per tier
-│   ├── site.yml         playbook
+│   ├── site.yml         playbook: a baseline play and one play per tier
+│   ├── group_vars/
+│   │   └── all.yml      ports shared by every tier
 │   └── roles/
-│       └── ssh_access/  custom SSH key per machine
+│       ├── ssh_access/  custom SSH key per machine
+│       ├── common/      packages, /etc/hosts, firewall baseline
+│       └── h2/          H2 server on db
 └── keys/                SSH key pairs generated on the host (not versioned)
 ```
 
@@ -293,4 +297,264 @@ A second `vagrant provision` changes nothing:
 db                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 app                        : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 proxy                      : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+### 4.4. Modularity: roles and task files
+
+> To ensure maintainability and readability, the use of modularity is
+> required. At a minimum, your solution must split tasks into separate files
+> using import_tasks or include_tasks. However, you are strongly encouraged to
+> use Ansible Roles
+
+Each CA2 script becomes one role with a single responsibility, and each role
+splits its tasks into files by concern:
+
+| CA2 script | Role | Task files |
+| --- | --- | --- |
+| `ssh-key.sh` | `ssh_access` | `main.yml` |
+| `base.sh` | `common` | `packages.yml`, `hosts.yml`, `firewall.yml` |
+| `db.sh` | `h2` | `install.yml`, `service.yml`, `firewall.yml` |
+
+```yaml
+# ansible/roles/h2/tasks/main.yml
+- name: Install Java and the H2 engine
+  ansible.builtin.import_tasks: install.yml
+
+- name: Run H2 as a service
+  ansible.builtin.import_tasks: service.yml
+
+- name: Restrict the H2 port to the application tier
+  ansible.builtin.import_tasks: firewall.yml
+```
+
+> - `import_tasks` was chosen over `include_tasks`. An import is resolved when
+>   the playbook is parsed, so every imported task is listed by
+>   `--list-tasks`, can be selected with `--start-at-task`, and inherits the
+>   tags and conditions of the import. An include is resolved only when the
+>   play reaches it, which is needed when the file name comes from a variable
+>   or a loop. No task file here depends on runtime data, so the static form is
+>   the simpler and more predictable one.
+> - Each role keeps its configurable values in `defaults/main.yml` (lowest
+>   precedence), its templates in `templates/` and its handlers in
+>   `handlers/main.yml`. Values shared by several tiers, such as the H2 and
+>   Bookstore ports, are in `group_vars/all.yml`.
+
+The playbook has a baseline play for every machine and one play per tier:
+
+```yaml
+# ansible/site.yml
+- name: Baseline of every machine
+  hosts: all
+  become: true
+  roles:
+    - ssh_access
+    - common
+
+- name: Database tier
+  hosts: dbservers
+  become: true
+  roles:
+    - h2
+```
+
+### 4.5. Common baseline: packages, names and firewall
+
+`common` replaces `base.sh` and the firewall commands that every CA2 script
+repeated:
+
+```yaml
+# ansible/roles/common/tasks/packages.yml
+- name: Install {{ common_packages | join(', ') }}
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: common_apt
+  until: common_apt is succeeded
+  retries: 5
+  delay: 10
+```
+
+> - `until`/`retries` handle a transient condition seen on a fresh Ubuntu box:
+>   `unattended-upgrades` can hold the dpkg lock during the first minutes, and
+>   a mirror can fail for a moment. The task is retried up to 5 times, 10
+>   seconds apart, before the run fails.
+> - `cache_valid_time: 3600` refreshes the package index only when it is older
+>   than one hour, so a second run does not report a change for it.
+
+```yaml
+# ansible/roles/common/tasks/hosts.yml
+- name: List every machine of the inventory in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} cogsi-ca3"
+    block: |
+      {% for host in groups['all'] | sort %}
+      {{ hostvars[host].ansible_host }} {{ host }}
+      {% endfor %}
+```
+
+> The addresses come from the inventory: adding a machine to `hosts.ini` is
+> enough for every machine to resolve it.
+
+The firewall closes every incoming port except SSH. Each tier opens its own
+port in its own role.
+
+### 4.6. H2 in server mode on db
+
+> Use Ansible to deploy and configure H2 in server mode on the db VM
+
+```yaml
+# ansible/roles/h2/tasks/install.yml (download step)
+- name: Download H2 {{ h2_version }}
+  ansible.builtin.get_url:
+    url: "{{ h2_url }}"
+    dest: "{{ h2_jar }}"
+    checksum: "sha1:{{ h2_sha1 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: h2_download
+  until: h2_download is succeeded
+  retries: 3
+  delay: 5
+  notify: Restart h2
+```
+
+> `get_url` downloads only when the jar is missing or does not match the
+> checksum published by Maven Central, and fails if a download is corrupted.
+> The CA2 script implemented the same with `sha1sum --check`, a temporary file
+> and a rename.
+
+The systemd unit is the CA2 one, now a Jinja2 template
+(`roles/h2/templates/h2.service.j2`) filled from the role defaults:
+
+```ini
+ExecStart=/usr/bin/java -cp {{ h2_jar }} org.h2.tools.Server -tcp -tcpAllowOthers -tcpPort {{ h2_port }} -baseDir {{ h2_data_dir }} -ifNotExists
+```
+
+```yaml
+# ansible/roles/h2/tasks/service.yml (excerpt)
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: h2.service.j2
+    dest: /etc/systemd/system/h2.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart h2
+
+- name: Enable and start h2
+  ansible.builtin.systemd_service:
+    name: h2
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for H2 to listen on port {{ h2_port }}
+  ansible.builtin.wait_for:
+    port: "{{ h2_port }}"
+    host: 127.0.0.1
+    timeout: 60
+```
+
+> - The handler `Restart h2` runs only when the unit or the jar changed. On
+>   the first run it restarts the service just started, which is harmless; on
+>   later runs nothing is notified and H2 keeps running.
+> - `flush_handlers` applies that restart before the port check, instead of at
+>   the end of the play.
+> - `wait_for` only proves that the port is open. The application-level
+>   check, a real SQL query, is part of the health checks in a later section.
+
+Only the application tier may reach the H2 port. The allowed addresses are
+taken from the `appservers` group of the inventory:
+
+```yaml
+# ansible/roles/h2/defaults/main.yml
+h2_allowed_clients: "{{ groups['appservers'] | map('extract', hostvars, 'ansible_host') | list }}"
+```
+
+```yaml
+# ansible/roles/h2/tasks/firewall.yml
+- name: Allow port {{ h2_port }} only from the application tier
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    to_ip: "{{ ansible_host }}"
+    port: "{{ h2_port | string }}"
+    proto: tcp
+  loop: "{{ h2_allowed_clients }}"
+```
+
+```bash
+vagrant provision
+```
+
+```console
+PLAY [Database tier] ***********************************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [db]
+
+TASK [h2 : Install the Java runtime] *******************************************
+changed: [db]
+
+TASK [h2 : Create the installation directory] **********************************
+changed: [db]
+
+TASK [h2 : Download H2 2.4.240] ************************************************
+changed: [db]
+
+TASK [h2 : Create the h2 service account] **************************************
+changed: [db]
+
+TASK [h2 : Create the data directory] ******************************************
+changed: [db]
+
+TASK [h2 : Install the systemd unit] *******************************************
+changed: [db]
+
+TASK [h2 : Enable and start h2] ************************************************
+changed: [db]
+
+RUNNING HANDLER [h2 : Restart h2] **********************************************
+changed: [db]
+
+TASK [h2 : Wait for H2 to listen on port 9092] *********************************
+ok: [db]
+
+TASK [h2 : Allow port 9092 only from the application tier] *********************
+changed: [db] => (item=192.168.56.21)
+
+PLAY RECAP *********************************************************************
+db                         : ok=19   changed=13   unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+app                        : ok=8    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+proxy                      : ok=8    changed=4    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+> The three recaps are printed by three separate runs, one per machine; they
+> are shown together here. A second `vagrant provision` reports `changed=0` on
+> the three machines.
+
+```bash
+vagrant ssh db -c 'systemctl is-active h2; sudo ufw status numbered'
+vagrant ssh app -c 'nc -zv -w 3 db 9092'
+vagrant ssh proxy -c 'nc -zv -w 3 db 9092'
+```
+
+```console
+active
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 192.168.56.22 9092/tcp     ALLOW IN    192.168.56.21
+[ 3] 22/tcp (v6)                ALLOW IN    Anywhere (v6)
+
+Connection to db (192.168.56.22) 9092 port [tcp/*] succeeded!
+
+nc: connect to db (192.168.56.22) port 9092 (tcp) timed out: Operation now in progress
 ```

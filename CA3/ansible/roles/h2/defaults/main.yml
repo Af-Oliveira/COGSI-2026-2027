@@ -1,0 +1,15 @@
+---
+# Must match the H2 version resolved by the Bookstore build (Spring Boot 4.1.1
+# manages com.h2database:h2 2.4.240): client and server speak the same protocol.
+h2_version: "2.4.240"
+h2_sha1: "686180ad33981ad943fdc0ab381e619b2c2fdfe5"
+h2_url: "https://repo1.maven.org/maven2/com/h2database/h2/{{ h2_version }}/h2-{{ h2_version }}.jar"
+
+h2_install_dir: /opt/h2
+h2_jar: "{{ h2_install_dir }}/h2-{{ h2_version }}.jar"
+h2_data_dir: /var/lib/h2
+h2_user: h2
+h2_port: 9092
+
+# Only the application tier may open a connection to the database port.
+h2_allowed_clients: "{{ groups['appservers'] | map('extract', hostvars, 'ansible_host') | list }}"

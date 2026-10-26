@@ -7,3 +7,10 @@
   become: true
   roles:
     - ssh_access
+    - common
+
+- name: Database tier
+  hosts: dbservers
+  become: true
+  roles:
+    - h2
