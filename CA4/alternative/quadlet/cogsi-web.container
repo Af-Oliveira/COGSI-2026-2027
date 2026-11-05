@@ -1,0 +1,29 @@
+# web: the Bookstore. Requires/After on db.service: systemd starts it only
+# after db reported healthy; its own Notify=healthy gates proxy.
+[Unit]
+Description=CA4 alternative - Bookstore (web)
+Requires=cogsi-db.service
+After=cogsi-db.service
+
+[Container]
+Image=localhost/cogsi-ca4-bookstore:1.0.0
+ContainerName=web
+Network=cogsi-backend.network
+Network=cogsi-frontend.network
+EnvironmentFile=%h/.config/cogsi-ca4/web.env
+Secret=cogsi-db-password,type=env,target=SPRING_DATASOURCE_PASSWORD
+HealthCmd=sh -c 'wget -qO- http://127.0.0.1:$SERVER_PORT/actuator/health | grep -q "\"status\":\"UP\""'
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=60s
+HealthStartupCmd=sh -c 'wget -qO- http://127.0.0.1:$SERVER_PORT/actuator/health | grep -q "\"status\":\"UP\""'
+HealthStartupInterval=2s
+Notify=healthy
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

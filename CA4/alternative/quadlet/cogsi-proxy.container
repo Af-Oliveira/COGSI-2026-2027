@@ -1,0 +1,26 @@
+# proxy: Nginx, the only published port. Starts after web is healthy.
+[Unit]
+Description=CA4 alternative - Nginx reverse proxy (proxy)
+Requires=cogsi-web.service
+After=cogsi-web.service
+
+[Container]
+Image=localhost/cogsi-ca4-proxy:1.0.0
+ContainerName=proxy
+Network=cogsi-frontend.network
+EnvironmentFile=%h/.config/cogsi-ca4/proxy.env
+PublishPort=${PROXY_PUBLISHED_PORT}:${NGINX_PORT}
+HealthCmd=sh -c 'wget -qO- http://127.0.0.1:$NGINX_PORT/nginx-health'
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+Notify=healthy
+
+[Service]
+EnvironmentFile=%h/.config/cogsi-ca4/proxy.env
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

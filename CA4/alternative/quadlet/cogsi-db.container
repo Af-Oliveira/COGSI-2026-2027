@@ -1,0 +1,29 @@
+# db: H2 in server mode. systemd marks the unit started only when the health
+# check passes (Notify=healthy), which is what web waits for.
+[Unit]
+Description=CA4 alternative - H2 database server (db)
+
+[Container]
+Image=localhost/cogsi-ca4-h2:2.4.240
+ContainerName=db
+Network=cogsi-backend.network
+Volume=cogsi-h2-data.volume:/var/lib/h2
+EnvironmentFile=%h/.config/cogsi-ca4/db.env
+# The password is a Podman secret, exposed to the process as an environment
+# variable but not stored in the container configuration.
+Secret=cogsi-db-password,type=env,target=DB_PASSWORD
+HealthCmd=/usr/local/bin/h2-healthcheck
+HealthInterval=15s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=30s
+HealthStartupCmd=/usr/local/bin/h2-healthcheck
+HealthStartupInterval=2s
+Notify=healthy
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
