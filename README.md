@@ -10,6 +10,7 @@ Mestrado em Engenharia Informatica, Instituto Superior de Engenharia do Porto.
 | `CA1/` | Build tools (Gradle, Ant alternative) | [CA1/README.md](CA1/README.md) |
 | `CA2/` | Virtualization with Vagrant (Multipass and cloud-init alternative) | [CA2/README.md](CA2/README.md) |
 | `CA3/` | Configuration management with Ansible (Puppet alternative) | [CA3/README.md](CA3/README.md) |
+| `CA4/` | Containerization with Docker and Docker Compose (Podman alternative) | [CA4/README.md](CA4/README.md) |
 
 ## Layout
 
@@ -20,6 +21,9 @@ Mestrado em Engenharia Informatica, Instituto Superior de Engenharia do Porto.
 - `CA2/part2/` - Vagrant environment with three VMs: `db` (H2 server), `app` (Bookstore) and `proxy` (Nginx) (Part 2).
 - `CA2/alternative/` - The Part 2 environment created with Multipass and cloud-init (alternative solution).
 - `CA3/` - The CA2 Part 2 environment provisioned with Ansible roles (`CA3/ansible/`), and with Puppet as the alternative (`CA3/alternative/`).
+- `CA4/part1/` - Docker images of the CA1 chat server and Bookstore, each built three ways (clone, host JAR, multi-stage) (Part 1).
+- `CA4/part2/` - The CA2 Part 2 environment (`db`, `web`, `proxy`) with Docker Compose (Part 2).
+- `CA4/alternative/` - The Part 2 environment with rootless Podman and Quadlet (alternative solution).
 
 Each assignment has its technical report, written as a tutorial, in the
 `README.md` of its folder.
