@@ -1790,16 +1790,24 @@ cogsi-ca4_backend internal=true cogsi-ca4-db-1=172.24.0.2/16 cogsi-ca4-web-1=172
   connection to any container address (CA2's `ufw` blocked the host too):
 
   ```console
-  $ nc -z -w2 172.25.0.2 9092 && echo "host -> db:9092 open"          # db's address on backend
+  $ DB_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "cogsi-ca4_backend").IPAddress}}' cogsi-ca4-db-1); echo "DB_IP=$DB_IP"
+  DB_IP=172.25.0.2
+  $ nc -z -w2 "$DB_IP" 9092 && echo "host -> db:9092 open"
   host -> db:9092 open
-  $ docker run --rm --network bridge alpine sh -c 'nc -z -w2 172.25.0.2 9092 || echo "other container (default bridge) -> db: blocked"'
+  $ docker run --rm --network bridge alpine sh -c "nc -z -w2 $DB_IP 9092 || echo 'other container (default bridge) -> db: blocked'"
   other container (default bridge) -> db: blocked
   ```
+
+  The address is read from Docker because it changes between runs: in this
+  run `db` got `172.25.0.2` on `backend`, while in the run recorded above
+  the two subnets were assigned the other way round.
 
   Only users who can run commands on the host reach these addresses, and
   they could equally use `docker exec`. From other machines, only the port
   published by `proxy` is reachable. Blocking the host as well would take a
-  rule in the `DOCKER-USER` chain of iptables, outside Compose.
+  host firewall rule on locally generated traffic (the `OUTPUT` chain),
+  outside Compose; Docker's `DOCKER-USER` chain only sees forwarded
+  traffic, not connections started by the host.
 - `backend` is `internal: true`: it has no gateway to the outside, so
   `db` cannot even resolve an external name. The database has no reason to
   reach the internet, and a compromised `db` cannot use it to exfiltrate
@@ -1948,9 +1956,9 @@ web       localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0   Up 9 seconds (
 locally, and `--no-build` makes Compose fail rather than build if an image is
 missing, so the environment came only from the registry. The new project
 started with an empty volume, so the database was created by the
-entrypoint, and the API answered with the sample data. The three images are
-also attached, as `docker save` archives, to the GitHub release of the tag
-`ca4-part2`, created at the end of the assignment (section 8).
+entrypoint, and the API answered with the sample data. The three images will
+also be attached, as `docker save` archives, to the GitHub release of the
+tag `ca4-part2` when it is created at the end of the assignment (section 8).
 
 ---
 
