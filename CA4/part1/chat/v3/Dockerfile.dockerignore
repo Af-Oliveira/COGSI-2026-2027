@@ -1,8 +1,9 @@
 # The build stage compiles the sources itself, so the host's build output and
-# Gradle caches are excluded: they are large, they would invalidate the COPY
-# cache on every local build and they could make the image depend on the host
-# state instead of the sources. IDE files and logs are excluded for the same
-# reason.
+# Gradle caches must never reach it. BuildKit only sends the paths named by
+# the COPY instructions (build scripts, gradle/, app/src/), so today these
+# rules do not change the context; they keep the image independent of the
+# host if a broader COPY is added, and they apply to builders that send the
+# whole context (legacy builder, Buildah/Podman). IDE files and logs likewise.
 .gradle/
 **/build/
 .kotlin/
