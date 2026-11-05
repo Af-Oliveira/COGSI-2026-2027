@@ -1,0 +1,4 @@
+# Version 1 copies nothing from the host: the sources are cloned during the
+# build. Excluding everything keeps the build context empty, so no local file
+# (keys, .env, build output) can reach the builder or the image by mistake.
+*

@@ -1,0 +1,12 @@
+# The build stage compiles the sources itself, so the host's build output and
+# Gradle caches are excluded: they are large, they would invalidate the COPY
+# cache on every local build and they could make the image depend on the host
+# state instead of the sources. IDE files and logs are excluded for the same
+# reason.
+.gradle/
+**/build/
+.kotlin/
+.idea/
+.vscode/
+*.iml
+*.log
