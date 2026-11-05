@@ -521,23 +521,36 @@ CA4/part1/measure.sh --skip-build  # inspects the existing images only
   [Trivy](https://trivy.dev) 0.76.1, run as a container with access to the
   Docker socket.
 
+The table is the second complete run, made after the version 3 images
+gained their non-root user (section 4.7). The first run, before that
+change, gave the same sizes, packages and CVEs, one layer less for each
+version 3 image, and these build times: chat 39.3 / 5.1 + 6.9 / 31.8 s,
+Bookstore 65.0 / 6.4 + 5.9 / 55.0 s.
+
 | Image | Build time (s) | Disk usage | Content size | Layers | History entries | JDK compiler | git | Gradle cache | Sources | OS packages | HIGH / CRITICAL CVEs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cogsi-chat:v1` | 39.3 | 1.14GB | 395MB | 11 | 27 | yes | yes | yes | yes | 158 | 15 / 2 |
-| `cogsi-chat:v2` | 5.1 + 6.9 | 291MB | 76.3MB | 7 | 16 | no | no | no | no | 73 | 3 / 0 |
-| `cogsi-chat:v3` | 31.8 | 291MB | 76.3MB | 6 | 15 | no | no | no | no | 73 | 3 / 0 |
-| `cogsi-bookstore:v1` | 65.0 | 1.55GB | 563MB | 10 | 25 | yes | yes | yes | yes | 158 | 30 / 14 |
-| `cogsi-bookstore:v2` | 6.4 + 5.9 | 393MB | 125MB | 6 | 14 | no | no | no | no | 73 | 8 / 4 |
-| `cogsi-bookstore:v3` | 55.0 | 392MB | 124MB | 10 | 18 | no | no | no | no | 73 | 8 / 4 |
+| `cogsi-chat:v1` | 36.5 | 1.14GB | 395MB | 11 | 27 | yes | yes | yes | yes | 158 | 15 / 2 |
+| `cogsi-chat:v2` | 5.2 + 5.4 | 291MB | 76.3MB | 7 | 16 | no | no | no | no | 73 | 3 / 0 |
+| `cogsi-chat:v3` | 27.5 | 291MB | 76.3MB | 7 | 17 | no | no | no | no | 73 | 3 / 0 |
+| `cogsi-bookstore:v1` | 71.1 | 1.55GB | 563MB | 10 | 25 | yes | yes | yes | yes | 158 | 30 / 14 |
+| `cogsi-bookstore:v2` | 5.9 + 7.3 | 393MB | 125MB | 6 | 14 | no | no | no | no | 73 | 8 / 4 |
+| `cogsi-bookstore:v3` | 149.3 | 392MB | 124MB | 11 | 20 | no | no | no | no | 73 | 8 / 4 |
 
-**Build time.** Version 2 is the fastest by far (12 s) because the host
-already has the Gradle distribution and every dependency in `~/.gradle`:
-its `docker build` only copies files. Versions 1 and 3 download Gradle 9.4
-(about 130 MB) and the dependencies on every cold build, which is most of
-their 32 to 65 s. Version 3 is still faster than version 1: it does not
-install `git` with `apt` nor clone the repository. The cold build is the
-worst case for version 3. On a rebuild, its layer order and cache mount pay
-off. After a one-line change to `ChatServerApp.java`:
+**Build time.** Version 2 is the fastest by far (11 to 13 s) because the
+host already has the Gradle distribution and every dependency in
+`~/.gradle`: its `docker build` only copies files. Versions 1 and 3
+download Gradle 9.4 (about 130 MB) and the dependencies on every cold build,
+so their time is mostly network time and varies between runs. For the chat
+server, version 3 was faster than version 1 in both runs (27.5 against
+36.5 s): it does not install `git` with `apt` nor clone the repository. For
+the Bookstore, version 3 took 55.0 s in the first run and 149.3 s in the
+second, against 65.0 and 71.1 s for version 1. The build log shows where
+the second run went: the step that only downloads the dependencies
+(`gradlew dependencies`) took 115.0 s on its own, against 22.7 s for the
+compilation. A cold build of versions 1 and 3 measures the network as much
+as the build. The cold build is also the worst case for version 3. On a
+rebuild, its layer order and cache mount pay off. After a one-line change
+to `ChatServerApp.java`:
 
 ```console
 #11 [build 5/8] COPY app/build.gradle app/
@@ -552,7 +565,7 @@ docker build ... 7.765 total
 ```
 
 Only the sources were copied again and compiled, with Gradle and the
-dependencies taken from the cache mount (7.8 s instead of 31.8 s). The
+dependencies taken from the cache mount (7.8 s instead of about 30 s cold). The
 change was a comment, so the compiled JAR came out byte-for-byte identical
 (Gradle 9 builds reproducible archives), and BuildKit, which compares
 content, reused even the runtime layer. Version 1 behaves the opposite way:
@@ -570,10 +583,11 @@ the build output.
 
 **Layer count.** Version 1 has more layers because each build step (`apt`,
 `clone`, `gradlew`, copy) is a `RUN` that leaves a layer. Versions 2 and 3
-add only their `COPY` instructions to the 5 layers of the base image: 2 for
-the chat server's version 2 (JAR and `lib/`), 1 for its version 3 (`/out`).
-The Bookstore's version 3 has the most layers of the small images (10), on
-purpose: the Spring Boot layers turn one 56 MB layer into four, so a code
+add only a few layers to the 5 of the base image: 2 `COPY` layers for the
+chat server's version 2 (JAR and `lib/`), and for its version 3 one `RUN`
+that creates the unprivileged user (32.8 kB, section 4.7) plus one `COPY`
+(`/out`). The Bookstore's version 3 has the most layers of the small images
+(11: the user, the `WORKDIR` and four Spring Boot layers), on purpose: the Spring Boot layers turn one 56 MB layer into four, so a code
 change only replaces the 32.8 kB one. Fewer layers is not a goal in itself.
 What matters is that the layers that change often are small and come last.
 
@@ -608,7 +622,7 @@ same on any machine with Docker.
 
 | Criterion | v1 clone | v2 host JAR | v3 multi-stage |
 | --- | --- | --- | --- |
-| Cold build | slowest | fastest (uses the host cache) | close to v1 |
+| Cold build | slow, network-bound | fastest (uses the host cache) | slow, network-bound |
 | Rebuild after a code change | does not see the change | host build + copy | only the changed layers |
 | Size (chat / Bookstore) | 1.14 / 1.55 GB | 291 / 393 MB | 291 / 392 MB |
 | Build tools in the image | JDK, git, Gradle, sources | none | none |
@@ -694,7 +708,9 @@ docker history cogsi-chat:v3 --format '{{.Size}}\t{{.CreatedBy}}'
 0B      CMD ["59001"]
 0B      ENTRYPOINT ["java" "-cp" "/opt/chat/chat-server.jar:/opt/chat/lib/*" ...
 0B      EXPOSE [59001/tcp]
+0B      USER 10001:10001
 2.4MB   COPY /out/ /opt/chat/ # buildkit
+32.8kB  RUN /bin/sh -c addgroup -S -g 10001 chat && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
 0B      ENTRYPOINT ["/__cacert_entrypoint.sh"]
 12.3kB  COPY --chmod=755 entrypoint.sh /__cacert_entrypoint.sh
 12.3kB  RUN /bin/sh -c set -eux; echo "Verifying install ..."
@@ -717,12 +733,13 @@ Reading the two histories from the bottom:
   application itself, 2.4 MB, is the last `RUN`. Deleting the caches in a
   later `RUN` would not help: the files would be hidden, but the earlier
   layers still contain them.
-- **Version 3** has a single application layer, `COPY /out/ /opt/chat/`.
-  The `build` stage and its layers do not appear: only the final stage
-  makes up the image.
-- **Version 2** (not shown) is the same as version 3 with two `COPY`
-  layers (`chat-server-*.jar`, 24.6 kB, and `lib/`, 2.39 MB) instead of one.
-- **Metadata.** `CMD`, `ENTRYPOINT`, `EXPOSE`, `ENV` and `ARG` create
+- **Version 3** has a single application layer, `COPY /out/ /opt/chat/`,
+  and the 32.8 kB layer of the user it runs as (`/etc/passwd`,
+  `/etc/group`, `/etc/shadow` updated by `adduser`). The `build` stage and
+  its layers do not appear: only the final stage makes up the image.
+- **Version 2** (not shown) has two `COPY` layers (`chat-server-*.jar`,
+  24.6 kB, and `lib/`, 2.39 MB) and no user layer, since it runs as root.
+- **Metadata.** `CMD`, `ENTRYPOINT`, `EXPOSE`, `USER`, `ENV` and `ARG` create
   history entries of 0 B and no filesystem layer, which is why there are
   more history entries than layers. The `ARG` values are recorded in the
   `RUN` lines that use them (`RUN |2 REPO_URL=... REPO_REF=main`).
@@ -738,9 +755,11 @@ Reading the two histories from the bottom:
 them every second. Without arguments it streams all the running containers;
 `--no-stream` prints one sample, which is what is recorded below. The
 Bookstore was started with limits, so that the `LIMIT` column and the CPU
-quota are visible:
+quota are visible. The container of section 4.3 is replaced, because a
+name can only be used once:
 
 ```bash
+docker rm -f bookstore-v3
 docker run -d --name bookstore-v3 --cpus 1.5 --memory 512m -p 18083:8080 cogsi-bookstore:v3
 F='{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
 docker stats --no-stream --format "table $F" bookstore-v3 chat-v3
@@ -828,7 +847,17 @@ What the samples show:
 > reduction, and container hardening
 
 Without a `USER` instruction the process runs as `root`, the default of the
-base image. Before the change, in `chat-v3`:
+base image. The Dockerfiles in the repository already contain the change;
+the version before it (commit `aff35b6`) can be built from Git to see the
+difference:
+
+```bash
+git show aff35b6:CA4/part1/chat/v3/Dockerfile | docker build -f - -t cogsi-chat:v3-root CA1/part1
+docker run -d --name chat-v3-root cogsi-chat:v3-root
+```
+
+The outputs below were taken in `chat-v3` before the change, which is the
+same image:
 
 ```console
 $ docker exec chat-v3 id
@@ -868,7 +897,7 @@ USER 10001:10001
 - The only directory the Bookstore writes to is `/tmp` (Tomcat's work
   directory), which every user can write to.
 
-After the change:
+After the change, in the containers of sections 4.2 and 4.3:
 
 ```console
 $ docker exec chat-v3 id
