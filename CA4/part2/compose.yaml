@@ -13,7 +13,7 @@
 # the current directory. Compose still reads CA4/part2/.env.
 #
 #   cp CA4/part2/.env.example CA4/part2/.env      # then set DB_PASSWORD
-#   docker compose -f CA4/part2/compose.yaml up -d --build
+#   docker compose -f CA4/part2/compose.yaml up -d --build --wait
 # =============================================================================
 
 name: cogsi-ca4

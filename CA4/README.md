@@ -1266,9 +1266,9 @@ gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
 | three VMs on a private network, fixed IPs (`192.168.56.20-22`) | three containers on two user-defined networks, found by name |
 | `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network; `proxy` is not on it |
 | `wait-for-port` before starting the Bookstore | `depends_on: condition: service_healthy` |
-| H2 data in a synced folder | H2 data in the named volume `h2-data` |
+| H2 data on the disk of the db VM (`/var/lib/h2`) | H2 data in the named volume `h2-data`, outside the container |
 | `Vagrantfile` variables and provisioning scripts | `.env` and Compose environment variables |
-| shell provisioning on every `vagrant up` | images built once (`docker compose build`), configured at start |
+| shell provisioning on the first `vagrant up` (or `--provision`), configuring each VM in place | images built once (`docker compose build`), configured by variables at every start |
 
 [`part2/compose.yaml`](part2/compose.yaml) describes the three services:
 
@@ -1529,9 +1529,9 @@ $ docker exec cogsi-ca4-db-1 ls -ln /var/lib/h2
   `application.properties` inside the JAR. CA2 wrote an
   `/etc/bookstore/application.properties` file; here the same settings are
   plain variables.
-- **`depends_on: condition: service_healthy`.** Compose creates `web` only
+- **`depends_on: condition: service_healthy`.** Compose starts `web` only
   when the health check of `db` passes. Without the condition, `depends_on`
-  only orders the creation of the containers, and the Bookstore could try
+  only orders the start of the containers, and the Bookstore could try
   to open its connection pool before H2 accepts connections.
 - **Health check.** `/actuator/health` aggregates the health of the
   datasource, so it is `UP` only if the application is up **and** its
@@ -1608,6 +1608,12 @@ not to the health status, so an unhealthy container is not restarted.
 > on the web container, so that the proxy service only starts after the
 > application is available
 
+Nginx continues the proxy of CA2 and CA3, so the configuration is the same
+one, and its official image fills a configuration template from environment
+variables at start, which is what the requirement on variables asks for.
+Traefik or Caddy, which discover containers through Docker labels, would add
+a second configuration model for a single fixed upstream.
+
 [`part2/proxy/Dockerfile`](part2/proxy/Dockerfile) adds a template to the
 official image:
 
@@ -1681,6 +1687,10 @@ server {
   (`localhost:8080`), so the HATEOAS links point to the proxy, as in CA2.
 - **`/nginx-health`** answers locally, without going to `web`, and is the
   proxy's health check.
+- **What the proxy exposes.** Everything under `/` goes to the Bookstore,
+  including `/actuator`. Spring Boot exposes only the `health` endpoint over
+  HTTP by default, without details (`/actuator/env`, for example, answers
+  404), so the health check used by Docker does not reveal configuration.
 
 ```yaml
   proxy:
@@ -1725,7 +1735,7 @@ On a user-defined network, Docker runs an embedded DNS server
 C exec -T web getent hosts db        # web is on backend and frontend
 C exec -T web getent hosts proxy
 C exec -T proxy getent hosts web
-C exec -T proxy getent hosts db      # proxy is only on frontend
+C exec -T proxy getent hosts db || echo "proxy: db not resolvable (exit $?)"   # proxy is only on frontend
 C exec -T db getent hosts web
 C exec -T proxy sh -c 'nc -z -w2 web 8080 && echo "proxy -> web:8080 open"'
 C exec -T web sh -c 'nc -z -w2 db 9092 && echo "web -> db:9092 open"'
@@ -1778,7 +1788,7 @@ Every value that may change between environments is a variable read from
 | db | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `bookstore`, required, required |
 | db | `H2_PORT`, `DB_JAVA_OPTS` | `H2_PORT`, `JAVA_OPTS`; storage `H2_DATA_DIR=/var/lib/h2` | `9092`, `-Xmx256m` |
 | web | `WEB_PORT` | `SERVER_PORT` | `8080` |
-| web | `DB_NAME`, `H2_PORT` | `SPRING_DATASOURCE_URL=jdbc:h2:tcp://db:<port>/./<name>` | |
+| web | `DB_NAME`, `H2_PORT` | `SPRING_DATASOURCE_URL=jdbc:h2:tcp://db:<port>/./<name>` | `bookstore`, `9092` |
 | web | `DB_USER`, `DB_PASSWORD` | `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | required |
 | web | `JPA_DDL_AUTO`, `JPA_SHOW_SQL`, `WEB_JAVA_OPTS` | `SPRING_JPA_*`, `JAVA_TOOL_OPTIONS` | `update`, `false`, `-XX:MaxRAMPercentage=75` |
 | proxy | `PROXY_PUBLISHED_PORT`, `PROXY_LISTEN_PORT` | host port, `NGINX_PORT` | `8080`, `80` |
@@ -1897,7 +1907,8 @@ locally, and `--no-build` makes Compose fail rather than build if an image is
 missing, so the environment came only from the registry. The new project
 started with an empty volume, so the database was created by the
 entrypoint, and the API answered with the sample data. The three images are
-also attached to the GitHub release of the tag `ca4-part2` (section 8).
+also attached, as `docker save` archives, to the GitHub release of the tag
+`ca4-part2`, created at the end of the assignment (section 8).
 
 ---
 
