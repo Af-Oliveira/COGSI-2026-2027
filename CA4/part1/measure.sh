@@ -46,7 +46,8 @@ timed() {
     local log=$1 start end
     shift
     start=$(date +%s.%N)
-    "$@" >>"$log" 2>&1
+    # Inside $(...) errexit is not inherited, so a failure is returned explicitly.
+    "$@" >>"$log" 2>&1 || return $?
     end=$(date +%s.%N)
     awk -v s="$start" -v e="$end" 'BEGIN { printf "%.1f", e - s }'
 }
