@@ -1,0 +1,7 @@
+# The context is CA1/part2, but the image needs only the executable JAR built
+# on the host. Everything is excluded and that JAR is re-included. The plain
+# JAR of the jar task (classes only, not runnable) is excluded explicitly: it
+# also matches bookstore-*.jar and would make the COPY ambiguous.
+*
+!build/libs/bookstore-*.jar
+build/libs/*-plain.jar
