@@ -1,9 +1,11 @@
 # Rendered by the entrypoint of the nginx image (envsubst) at container start.
 
-# Docker's embedded DNS server. With a variable in proxy_pass, Nginx resolves
+# The container's DNS server, taken from /etc/resolv.conf by the image's
+# entrypoint (NGINX_ENTRYPOINT_LOCAL_RESOLVERS): 127.0.0.11 under Docker, the
+# network gateway under Podman. With a variable in proxy_pass, Nginx resolves
 # the upstream name at request time (cached for 10 s) instead of once at
 # start, so it follows the web container if it is recreated with a new address.
-resolver 127.0.0.11 valid=10s ipv6=off;
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
 
 server {
     listen ${NGINX_PORT} default_server;
