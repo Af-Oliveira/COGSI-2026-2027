@@ -38,6 +38,7 @@ ENV DB_NAME=bookstore \
 
 USER 10001:10001
 WORKDIR /var/lib/h2
+# Documentation only: the port actually used is H2_PORT (9092 by default).
 EXPOSE 9092
 
 ENTRYPOINT ["/usr/local/bin/h2-entrypoint"]

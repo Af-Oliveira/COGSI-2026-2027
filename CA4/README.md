@@ -54,7 +54,7 @@ Ansible. CA4 packages the same applications in containers:
 | Host | Debian GNU/Linux 13 (trixie), kernel 6.12, x86-64 | 12 CPUs, 16 GB RAM |
 | Docker Engine | 29.9.2 (API 1.56) | containerd 2.4.2 image store |
 | Docker Buildx | 0.38.1 | BuildKit: cache mounts, Dockerfile-specific ignore files |
-| Docker Compose | 5.6.1 | Part 2 |
+| Docker Compose | 5.6.1 | Part 2; `start_interval` in the health checks needs Docker Engine 25 and Compose 2.20 or later |
 | JDK on the host | OpenJDK 21.0.4 | only for version 2 of each image and for the chat client |
 | Base images | `eclipse-temurin:21.0.13_9-jdk`, `eclipse-temurin:21.0.13_9-jre-alpine` | pinned to a JDK release, see [section 4.1](#41-build-strategies-and-base-images) |
 
@@ -1264,7 +1264,7 @@ gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
 | CA2 Part 2 (Vagrant) | CA4 Part 2 (Compose) |
 | --- | --- |
 | three VMs on a private network, fixed IPs (`192.168.56.20-22`) | three containers on two user-defined networks, found by name |
-| `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network; `proxy` is not on it |
+| `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network, which `proxy` is not on (container-to-container isolation; section 5.7) |
 | `wait-for-port` before starting the Bookstore | `depends_on: condition: service_healthy` |
 | H2 data on the disk of the db VM (`/var/lib/h2`) | H2 data in the named volume `h2-data`, outside the container |
 | `Vagrantfile` variables and provisioning scripts | `.env` and Compose environment variables |
@@ -1538,9 +1538,24 @@ $ docker exec cogsi-ca4-db-1 ls -ln /var/lib/h2
   connection to H2 works. `wget` is BusyBox's, already in the Alpine image.
   `$$` stops Compose from interpolating `SERVER_PORT` from `.env`, so
   the shell of the container expands it.
-- **JVM sizing.** `-XX:MaxRAMPercentage=75` gives the heap 75% of the
-  container's memory limit when one is set, instead of the JVM default of
-  25% (section 4.6).
+- **Resource limits and JVM sizing.** Each service has a memory and CPU
+  limit under `deploy.resources.limits` (web 768 MiB and 1.5 CPUs, db
+  512 MiB and 1 CPU, proxy 128 MiB and 0.5 CPU, all variables in `.env`).
+  `-XX:MaxRAMPercentage=75` then gives the Bookstore's heap 75% of its
+  limit instead of the JVM default of 25% (section 4.6). Without a limit
+  the JVM would size it from the whole host (11.6 GiB here).
+
+  ```console
+  $ docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' cogsi-ca4-db-1 cogsi-ca4-web-1 cogsi-ca4-proxy-1
+  NAME                CPU %     MEM USAGE / LIMIT   MEM %
+  cogsi-ca4-db-1      0.28%     41.37MiB / 512MiB   8.08%
+  cogsi-ca4-web-1     0.35%     208.6MiB / 768MiB   27.17%
+  cogsi-ca4-proxy-1   0.00%     10.05MiB / 128MiB   7.85%
+  $ C exec -T web sh -c 'java -XX:MaxRAMPercentage=75 -XX:+PrintFlagsFinal -version | grep " MaxHeapSize "'
+     size_t MaxHeapSize          = 603979776     {product} {ergonomic}
+  ```
+
+  576 MiB is 75% of 768 MiB.
 - **The image is the non-root version 3** of Part 1 (UID 10001).
 
 ```console
@@ -1691,6 +1706,11 @@ server {
   including `/actuator`. Spring Boot exposes only the `health` endpoint over
   HTTP by default, without details (`/actuator/env`, for example, answers
   404), so the health check used by Docker does not reveal configuration.
+- **The Nginx master process runs as root** in the official image, to bind
+  port 80, and its workers, which handle the requests, run as the user
+  `nginx`. The container writes nothing to the host. The
+  `nginxinc/nginx-unprivileged` image would remove root entirely, at the
+  cost of listening on a port above 1024 inside the container.
 
 ```yaml
   proxy:
@@ -1761,9 +1781,25 @@ cogsi-ca4_backend internal=true cogsi-ca4-db-1=172.24.0.2/16 cogsi-ca4-web-1=172
 - `web` has one address on each network, and each peer sees the address on
   the network they share (`db` sees `web` as `172.24.0.3`, `proxy` as
   `172.25.0.2`).
-- `proxy` cannot resolve `db` at all: they share no network. This replaces
-  the `ufw` rule of CA2, and it is enforced by the topology rather than by a
-  firewall rule inside a machine.
+- `proxy` cannot resolve `db` at all: they share no network. Between
+  containers, this replaces the `ufw` rule of CA2, enforced by the topology
+  rather than by a firewall rule inside a machine. A container on another
+  network cannot reach `db` either.
+- The isolation is between containers, not from the host. On Linux the
+  bridge networks are interfaces of the host, so the host itself can open a
+  connection to any container address (CA2's `ufw` blocked the host too):
+
+  ```console
+  $ nc -z -w2 172.25.0.2 9092 && echo "host -> db:9092 open"          # db's address on backend
+  host -> db:9092 open
+  $ docker run --rm --network bridge alpine sh -c 'nc -z -w2 172.25.0.2 9092 || echo "other container (default bridge) -> db: blocked"'
+  other container (default bridge) -> db: blocked
+  ```
+
+  Only users who can run commands on the host reach these addresses, and
+  they could equally use `docker exec`. From other machines, only the port
+  published by `proxy` is reachable. Blocking the host as well would take a
+  rule in the `DOCKER-USER` chain of iptables, outside Compose.
 - `backend` is `internal: true`: it has no gateway to the outside, so
   `db` cannot even resolve an external name. The database has no reason to
   reach the internet, and a compromised `db` cannot use it to exfiltrate
@@ -1793,6 +1829,12 @@ Every value that may change between environments is a variable read from
 | web | `JPA_DDL_AUTO`, `JPA_SHOW_SQL`, `WEB_JAVA_OPTS` | `SPRING_JPA_*`, `JAVA_TOOL_OPTIONS` | `update`, `false`, `-XX:MaxRAMPercentage=75` |
 | proxy | `PROXY_PUBLISHED_PORT`, `PROXY_LISTEN_PORT` | host port, `NGINX_PORT` | `8080`, `80` |
 | proxy | `PROXY_UPSTREAM_HOST`, `WEB_PORT`, `PROXY_READ_TIMEOUT` | `UPSTREAM_HOST`, `UPSTREAM_PORT`, `PROXY_READ_TIMEOUT` | `web`, `8080`, `60s` |
+| each | `DB_MEM_LIMIT`, `DB_CPUS`, `WEB_MEM_LIMIT`, `WEB_CPUS`, `PROXY_MEM_LIMIT`, `PROXY_CPUS` | memory and CPU limits of the containers | `512m`, `1`, `768m`, `1.5`, `128m`, `0.5` |
+
+The data directory `/var/lib/h2` is the one fixed storage setting: it is
+where the image creates the directory owned by `h2` that the empty volume
+copies (section 5.3), so it belongs to the image, not to the environment.
+What is configurable is the database name and the volume behind it.
 
 - **One source per value.** `DB_USER` and `DB_PASSWORD` configure both
   sides, the database and the datasource, so they cannot drift apart.
