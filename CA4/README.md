@@ -915,3 +915,120 @@ Why it matters:
 Versions 1 and 2 were left as root on purpose, as the baseline of the
 comparison: running as non-root does not depend on the build strategy and
 would be the same three lines in any of them.
+
+### 4.8. Tags and publishing
+
+> Tag your images appropriately and publish them to Docker Hub
+
+#### Tagging scheme
+
+| Tag | Example | Points to | Moves? |
+| --- | --- | --- | --- |
+| `<version>-<strategy>` | `cogsi-chat:1.0-v1` | one build strategy of one application version | no |
+| `<strategy>` | `cogsi-chat:v3` | the latest build of that strategy | yes |
+| `<version>` | `cogsi-bookstore:1.0.0` | the recommended image (version 3) of that application version | no |
+| `latest` | `cogsi-bookstore:latest` | the recommended image of the latest version | yes |
+
+- The application version comes from the project itself (`appVersion=1.0`
+  in `CA1/part1/gradle.properties`, `version = '1.0.0'` in
+  `CA1/part2/build.gradle`), so the tag says which code is inside.
+- The build strategy is part of the tag and not of the repository name: the
+  three images run the same application, and one repository per
+  application keeps them side by side (`docker pull rmotafreitas/cogsi-chat:1.0-v2`).
+- `latest` is only a default for `docker pull` without a tag. Anything that
+  must be reproducible (the Compose file of Part 2) uses a fixed tag, and the
+  digest (`sha256:...`) is what identifies the content: `latest`, `1.0.0` and
+  `1.0.0-v3` of the Bookstore have the same digest.
+
+#### Publishing
+
+[`part1/publish.sh`](part1/publish.sh) applies the scheme to the six images
+built in sections 4.2 and 4.3 and pushes them to any registry, given by
+`REGISTRY` and `NAMESPACE`. `DRY_RUN=1` prints the commands:
+
+```console
+$ DRY_RUN=1 REGISTRY=docker.io CA4/part1/publish.sh | head -6
++ docker tag cogsi-chat:v1 docker.io/rmotafreitas/cogsi-chat:1.0-v1
++ docker tag cogsi-chat:v1 docker.io/rmotafreitas/cogsi-chat:v1
++ docker tag cogsi-chat:v2 docker.io/rmotafreitas/cogsi-chat:1.0-v2
++ docker tag cogsi-chat:v2 docker.io/rmotafreitas/cogsi-chat:v2
++ docker tag cogsi-chat:v3 docker.io/rmotafreitas/cogsi-chat:1.0-v3
++ docker tag cogsi-chat:v3 docker.io/rmotafreitas/cogsi-chat:v3
+```
+
+> **Docker Hub is pending.** The machine used for this assignment is not
+> logged in to the group's Docker Hub account (`rmotafreitas`), so the
+> images were not pushed there. Publishing was verified instead with
+> a local registry and a GitHub release (below). The Docker Hub push is the
+> same script once the account is logged in:
+>
+> ```bash
+> docker login -u rmotafreitas
+> REGISTRY=docker.io CA4/part1/publish.sh
+> ```
+
+**Local registry.** `registry:3` is the reference implementation of the OCI
+distribution API, the same protocol Docker Hub uses. It runs as a container,
+with its storage in a volume:
+
+```bash
+docker run -d --name registry --restart unless-stopped -p 5000:5000 \
+  -v registry-data:/var/lib/registry registry:3
+REGISTRY=localhost:5000 CA4/part1/publish.sh
+curl -s localhost:5000/v2/_catalog
+curl -s localhost:5000/v2/rmotafreitas/cogsi-chat/tags/list
+curl -s localhost:5000/v2/rmotafreitas/cogsi-bookstore/tags/list
+```
+
+```console
+{"repositories":["rmotafreitas/cogsi-bookstore","rmotafreitas/cogsi-chat"]}
+{"name":"rmotafreitas/cogsi-chat","tags":["1.0","1.0-v1","1.0-v2","1.0-v3","latest","v1","v2","v3"]}
+{"name":"rmotafreitas/cogsi-bookstore","tags":["1.0.0","1.0.0-v1","1.0.0-v2","1.0.0-v3","latest","v1","v2","v3"]}
+```
+
+Docker accepts a registry on `localhost` over plain HTTP; any other host
+would need TLS or an `insecure-registries` entry in the daemon
+configuration. The 16 tags take 871 MB in the registry's volume: the layers
+shared between images (the JRE base of versions 2 and 3, the JDK of
+version 1) are stored once.
+
+To check that the registry really serves the images, every local copy of the
+Bookstore's version 2 was deleted and pulled back:
+
+```bash
+docker rmi cogsi-bookstore:v2 localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2 \
+  localhost:5000/rmotafreitas/cogsi-bookstore:v2
+docker pull localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+docker run -d --name pulled-v2 -p 18090:8080 localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+curl -s localhost:18090/actuator/health
+```
+
+```console
+ae393e711df0: Pull complete
+Digest: sha256:29da09e40243c7cf9ae894f78422ba9ea86d403b3ba62e5078312cd22c34835c
+Status: Downloaded newer image for localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+{"groups":["liveness","readiness"],"status":"UP"}
+```
+
+```console
+$ docker buildx imagetools inspect localhost:5000/rmotafreitas/cogsi-bookstore:latest | head -3
+Name:      localhost:5000/rmotafreitas/cogsi-bookstore:latest
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:89a08b03ebd8c5ca5cdd576e20781ebb53197e18b603afe57f5693a398ce7378
+```
+
+The pushed image is an OCI image index (`vnd.oci.image.index.v1+json`): the
+containerd image store pushes the image together with its build
+attestations, so a registry stores a list that points to the image for
+`linux/amd64`.
+
+**GitHub release.** The version 3 images of both applications are also
+attached to the GitHub release of the tag `ca4-part1` (section 4.9) as
+`docker save` archives, with their SHA-256 checksums. They can be loaded
+without any registry:
+
+```bash
+gh release download ca4-part1 -R Af-Oliveira/COGSI-2026-2027 -p 'cogsi-*.tar.gz' -p SHA256SUMS
+sha256sum -c SHA256SUMS
+docker load -i cogsi-chat-1.0-v3.tar.gz
+```
