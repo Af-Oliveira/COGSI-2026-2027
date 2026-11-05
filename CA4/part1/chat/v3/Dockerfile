@@ -42,7 +42,18 @@ RUN --mount=type=cache,target=/root/.gradle \
 # ---------------------------------------------------------------------------
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
 
+# Dedicated system user, without a home or a login shell. A fixed numeric UID
+# lets a runtime check that the image is not root without reading
+# /etc/passwd (e.g. Kubernetes runAsNonRoot).
+RUN addgroup -S -g 10001 chat \
+ && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
+
+# The files keep the default owner, root, and mode 0644: the server can read
+# its code but cannot change it.
 COPY --from=build /out/ /opt/chat/
+
+# Everything from here on, including the entry point, runs as the user.
+USER 10001:10001
 
 EXPOSE 59001
 
