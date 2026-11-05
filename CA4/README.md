@@ -1964,7 +1964,63 @@ tag `ca4-part2` when it is created at the end of the assignment (section 8).
 
 ## 6. Alternative solution - analysis and design
 
-_Second week of the assignment._
+> Present alternative technological solutions for the containerization tool
+> (i.e., not based on Docker). Analyze how the alternative solutions compare
+> to your base solution. Present how the alternative tools compare to Docker
+> regarding containerization features. Describe how the alternative tools
+> could be used (i.e., only the design of the solution) to solve the same
+> goals as presented for this assignment
+
+### 6.1. Candidates
+
+Docker is a client (`docker`) and a daemon (`dockerd`) that runs as root and
+delegates to containerd and runc. The images it builds follow the Open
+Container Initiative (OCI) image specification, and runc implements the OCI
+runtime specification. Any tool that implements the same specifications can
+run the same images, which narrows the question to how each tool builds,
+runs, connects and orchestrates containers. Four tools that do not use the
+Docker daemon were considered:
+
+| Tool | Kind of container | Origin and model |
+| --- | --- | --- |
+| **Podman** (with Buildah) | application (OCI) | Red Hat, CLI compatible with Docker, no daemon: each container is a child process of a small monitor (`conmon`), rootless by default |
+| **containerd + nerdctl** | application (OCI) | CNCF; containerd is the runtime under Docker and Kubernetes; nerdctl is a Docker-compatible CLI for it, with BuildKit for builds |
+| **LXC / Incus** | system (a whole OS with its init) | Linux Containers project; Incus is the community fork of LXD, managed by a daemon with a REST API |
+| **Apptainer** (formerly Singularity) | application, single-file images (SIF) | Linux Foundation; HPC clusters, runs as the calling user, no daemon |
+
+### 6.2. Comparison with Docker
+
+| Feature | Docker | Podman | containerd + nerdctl | Incus (LXC) | Apptainer |
+| --- | --- | --- | --- | --- | --- |
+| Daemon | `dockerd`, as root | none | `containerd` (+ `buildkitd` to build) | `incusd` | none |
+| Rootless | optional mode | default (user namespaces, `/etc/subuid`) | optional (RootlessKit) | unprivileged containers by default, the daemon is root | always runs as the user |
+| Build from a Dockerfile | BuildKit | Buildah (`podman build`), Containerfile or Dockerfile | BuildKit (`nerdctl build`) | no: images are built from a configured container (`incus publish`) or with distrobuilder | no: definition file (`.def`); can start from an OCI image (`Bootstrap: docker`) |
+| Image format and registries | OCI / Docker, any registry | OCI / Docker, any registry | OCI / Docker, any registry | its own image servers; OCI registries for application containers since Incus 6.3 | SIF file; pulls OCI images and pushes SIF to OCI registries (ORAS) |
+| Multi-container definition | Compose | `podman compose` (runs podman-compose or docker-compose), `podman kube play` (Kubernetes YAML), Quadlet (systemd units) | `nerdctl compose` | profiles, cloud-init or Ansible | none (instances started by scripts) |
+| Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default |
+| Health checks | `HEALTHCHECK`, `healthcheck:` | `HEALTHCHECK`, `--health-*`, run by systemd timers | depends on the nerdctl version | none (systemd inside the container) | none |
+| Start after a dependency is healthy | `depends_on: condition: service_healthy` | Quadlet `Notify=healthy` + `Requires=`/`After=` (podman-compose 1.3.0 ignores the condition, section 7) | depends on the nerdctl version | systemd ordering inside, none between containers | none |
+| Volumes | named volumes, bind mounts | the same | the same | storage volumes, disk devices | bind mounts, overlay images |
+| Resource monitoring | `docker stats` | `podman stats`, `podman pod stats` | `nerdctl stats` | `incus info`, `incus top` | `apptainer instance stats` (cgroups v2) |
+| Integration with the init system | restart policies of the daemon | `podman generate systemd` (deprecated), Quadlet | restart policies | the daemon starts its instances | none |
+
+The main differences for CA4:
+
+- **Podman** keeps the Docker command line, the Dockerfiles and the images.
+  It removes the root daemon: a container belongs to the user who starts it,
+  and a root process in a rootless container is mapped to an unprivileged
+  user of the host. The trade-off is that what Docker does inside the daemon
+  (restart policies, scheduling of health checks, start order) is delegated
+  to systemd.
+- **nerdctl** is the closest to Docker, and the containerd underneath is the
+  one Docker itself uses, so it changes the least and teaches the least.
+- **Incus** runs system containers: each one boots an init and behaves like
+  the virtual machines of CA2 and CA3, so the CA3 Ansible playbook could
+  configure them almost unchanged. This is a different model from one process
+  per container, and the Dockerfiles of Part 1 are not used.
+- **Apptainer** targets batch jobs on shared clusters: no isolated networks,
+  no health checks and no orchestration, which leaves most of Part 2 without
+  support.
 
 ---
 
