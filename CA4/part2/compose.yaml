@@ -1,10 +1,11 @@
 # =============================================================================
 # CA4 Part 2 - the CA2 Part 2 environment with Docker Compose
 # -----------------------------------------------------------------------------
+#   proxy  Nginx, the only published port          networks: frontend
 #   web    Bookstore (Spring Boot)                  networks: frontend, backend
 #   db     H2 in server mode, data in a volume      networks: backend (internal)
 #
-# Start order: db healthy -> web.
+# Start order: db healthy -> web healthy -> proxy.
 #
 # Every setting comes from the environment; copy .env.example to .env first.
 # Run from the repository root: the web image is built from the Part 1
@@ -67,9 +68,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      # Temporary: published until the proxy service is added.
-      - "${WEB_PORT:-8080}:${WEB_PORT:-8080}"
     networks:
       - backend
       - frontend
@@ -80,6 +78,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+
+  proxy:
+    image: ${IMAGE_NAMESPACE:-rmotafreitas}/cogsi-ca4-proxy:${PROXY_VERSION:-1.0.0}
+    build:
+      context: ./proxy
+    environment:
+      NGINX_PORT: ${PROXY_LISTEN_PORT:-80}
+      UPSTREAM_HOST: ${PROXY_UPSTREAM_HOST:-web}
+      UPSTREAM_PORT: ${WEB_PORT:-8080}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-60s}
+    ports:
+      - "${PROXY_PUBLISHED_PORT:-8080}:${PROXY_LISTEN_PORT:-80}"
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${NGINX_PORT}/nginx-health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
       start_interval: 2s
     restart: unless-stopped
 
