@@ -1,11 +1,18 @@
 # =============================================================================
 # CA4 Part 2 - the CA2 Part 2 environment with Docker Compose
 # -----------------------------------------------------------------------------
+#   web    Bookstore (Spring Boot)                  networks: frontend, backend
 #   db     H2 in server mode, data in a volume      networks: backend (internal)
 #
-# Every setting comes from the environment; copy .env.example to .env first.
+# Start order: db healthy -> web.
 #
-#   cd CA4/part2 && cp .env.example .env && docker compose up -d --build
+# Every setting comes from the environment; copy .env.example to .env first.
+# Run from the repository root: the web image is built from the Part 1
+# Dockerfile, and Buildx only reads files outside the context that are under
+# the current directory. Compose still reads CA4/part2/.env.
+#
+#   cp CA4/part2/.env.example CA4/part2/.env      # then set DB_PASSWORD
+#   docker compose -f CA4/part2/compose.yaml up -d --build
 # =============================================================================
 
 name: cogsi-ca4
@@ -39,7 +46,45 @@ services:
       start_interval: 2s
     restart: unless-stopped
 
+  web:
+    image: ${IMAGE_NAMESPACE:-rmotafreitas}/cogsi-ca4-bookstore:${APP_VERSION:-1.0.0}
+    build:
+      # The version 3 Dockerfile of Part 1, with the CA1 project as context.
+      context: ../../CA1/part2
+      dockerfile: ../../CA4/part1/bookstore/v3/Dockerfile
+    environment:
+      # Spring Boot maps these variables to its properties (relaxed binding):
+      # SPRING_DATASOURCE_URL -> spring.datasource.url, and so on. They take
+      # precedence over application.properties inside the JAR.
+      SERVER_PORT: ${WEB_PORT:-8080}
+      SPRING_DATASOURCE_URL: jdbc:h2:tcp://db:${H2_PORT:-9092}/./${DB_NAME:-bookstore}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:?set DB_USER in .env}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: ${JPA_DDL_AUTO:-update}
+      SPRING_JPA_SHOW_SQL: ${JPA_SHOW_SQL:-false}
+      SPRING_H2_CONSOLE_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: ${WEB_JAVA_OPTS:--XX:MaxRAMPercentage=75}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Temporary: published until the proxy service is added.
+      - "${WEB_PORT:-8080}:${WEB_PORT:-8080}"
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      # The actuator health includes the datasource: UP only if H2 answers.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${SERVER_PORT}/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+
 networks:
+  frontend: {}
   # No route outside the host: db is reachable only from the services
   # attached to this network.
   backend:
