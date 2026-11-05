@@ -1,0 +1,4 @@
+# Backend tier: db and web. Internal: no route outside the host (as in Compose).
+[Network]
+NetworkName=cogsi-backend
+Internal=true

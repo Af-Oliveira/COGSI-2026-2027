@@ -85,11 +85,12 @@ CA4/
 │   │   └── v3/
 │   ├── measure.sh            builds, inspects and scans the six images (section 4.4)
 │   └── publish.sh            tags and pushes the six images to a registry (section 4.8)
-└── part2/                    Docker Compose environment (section 5)
-    ├── compose.yaml          services db, web and proxy, networks and volume
-    ├── .env.example          template of the environment (.env is not versioned)
-    ├── db/                   H2 server image: Dockerfile, entrypoint, health check
-    └── proxy/                Nginx image: Dockerfile and configuration template
+├── part2/                    Docker Compose environment (section 5)
+│   ├── compose.yaml          services db, web and proxy, networks and volume
+│   ├── .env.example          template of the environment (.env is not versioned)
+│   ├── db/                   H2 server image: Dockerfile, entrypoint, health check
+│   └── proxy/                Nginx image: Dockerfile and configuration template
+└── alternative/              the same environment with rootless Podman and Quadlet (section 7)
 ```
 
 The applications are not copied into `CA4/`: versions 2 and 3 use `CA1/part1`
@@ -1997,7 +1998,7 @@ Docker daemon were considered:
 | Build from a Dockerfile | BuildKit | Buildah (`podman build`), Containerfile or Dockerfile | BuildKit (`nerdctl build`) | no: images are built from a configured container (`incus publish`) or with distrobuilder | no: definition file (`.def`); can start from an OCI image (`Bootstrap: docker`) |
 | Image format and registries | OCI / Docker, any registry | OCI / Docker, any registry | OCI / Docker, any registry | its own image servers; OCI registries for application containers since Incus 6.3 | SIF file; pulls OCI images and pushes SIF to OCI registries (ORAS) |
 | Multi-container definition | Compose | `podman compose` (runs podman-compose or docker-compose), `podman kube play` (Kubernetes YAML), Quadlet (systemd units) | `nerdctl compose` | profiles, cloud-init or Ansible | none (instances started by scripts) |
-| Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default |
+| Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default; network namespaces with CNI (`--net --network`) as root or with administrator configuration |
 | Health checks | `HEALTHCHECK`, `healthcheck:` | `HEALTHCHECK`, `--health-*`, run by systemd timers | depends on the nerdctl version | none (systemd inside the container) | none |
 | Start after a dependency is healthy | `depends_on: condition: service_healthy` | Quadlet `Notify=healthy` + `Requires=`/`After=` (podman-compose 1.3.0 ignores the condition, section 7) | depends on the nerdctl version | systemd ordering inside, none between containers | none |
 | Volumes | named volumes, bind mounts | the same | the same | storage volumes, disk devices | bind mounts, overlay images |
@@ -2018,9 +2019,10 @@ The main differences for CA4:
   the virtual machines of CA2 and CA3, so the CA3 Ansible playbook could
   configure them almost unchanged. This is a different model from one process
   per container, and the Dockerfiles of Part 1 are not used.
-- **Apptainer** targets batch jobs on shared clusters: no isolated networks,
-  no health checks and no orchestration, which leaves most of Part 2 without
-  support.
+- **Apptainer** targets batch jobs on shared clusters: containers share the
+  host network unless isolated networking is enabled (as root, or as
+  configured by an administrator), and there are no health checks and no
+  orchestration, which leaves most of Part 2 to scripts.
 
 ### 6.3. Design of CA4 with each tool
 
@@ -2066,12 +2068,16 @@ The main differences for CA4:
 - Part 1: a `.def` file per application (`Bootstrap: docker`,
   `From: eclipse-temurin:21-jdk`, `%post` to clone and build, `%runscript`
   to start), or `apptainer build chat.sif docker-daemon://cogsi-chat:v3` to
-  convert an existing image. The three versions are only partly
-  reproducible: there are no multi-stage builds in the same sense (a
-  second `.def` can copy files from the first SIF with `%files from`).
-- Part 2: three instances on the host network, started in order by a script
-  that waits for each port; the H2 data directory as a bind mount. No
-  network isolation between tiers.
+  convert an existing image. The three versions map directly: version 3
+  is a multi-stage definition file, with a `Stage: build` section that
+  compiles and a `Stage: runtime` section that copies the result with
+  `%files from build`.
+- Part 2: three instances (`apptainer instance start`), started in order
+  by a script that waits for each health endpoint; the H2 data directory as a
+  bind mount. As an unprivileged user they share the host network, so the
+  tiers are separated only by the ports they listen on; isolated networks
+  (`--net --network`, CNI) need root or a configuration by the
+  administrator.
 
 ### 6.4. Choice
 
@@ -2089,7 +2095,543 @@ Podman is implemented in [section 7](#7-alternative-solution---implementation):
 
 ## 7. Alternative solution - implementation
 
-_Second week of the assignment._
+> To achieve the requirements for the highest grade, implement one of the
+> alternative designs proposed in the previous item. Clearly identify any
+> requirements not covered by the implementation and justify the
+> limitations
+
+The Podman design of section 6.3 is implemented in
+[`alternative/`](alternative):
+
+```text
+CA4/alternative/
+├── .gitignore             ignores podman.env (local settings)
+├── registries.conf        short-name aliases of the base images (7.2)
+├── podman.env.example     settings of the environment (the variables of part2/.env.example)
+├── up.sh                  builds the images, creates the secret, installs and starts the units (7.4)
+├── down.sh                stops the environment and removes the units (--purge: volume, secret, networks)
+└── quadlet/               systemd units generated by Podman's Quadlet
+    ├── cogsi-frontend.network
+    ├── cogsi-backend.network
+    ├── cogsi-h2-data.volume
+    ├── cogsi-db.container
+    ├── cogsi-web.container
+    └── cogsi-proxy.container
+```
+
+The Dockerfiles of Parts 1 and 2 are used unchanged: the alternative
+replaces the tool that builds and runs the containers, not the images.
+
+### 7.1. Rootless Podman on the host
+
+```bash
+sudo apt install -y podman podman-compose uidmap passt slirp4netns fuse-overlayfs
+podman info --format '{{.Host.Security.Rootless}} {{.Host.NetworkBackend}} {{.Store.GraphDriverName}} {{.Host.CgroupsVersion}} {{.Host.CgroupManager}}'
+grep "$USER" /etc/subuid
+podman unshare cat /proc/self/uid_map
+```
+
+```console
+podman version 5.4.2
+true netavark overlay v2 systemd
+rmotafreitas:100000:65536
+         0       1000          1
+         1     100000      65536
+```
+
+Installing is the only step that needs `sudo`. After it, every Podman
+command in this section runs as the normal user, with no daemon and no
+membership in a privileged group (with Docker, the `docker` group is
+equivalent to root, because the daemon runs as root). Each user has their
+own images, containers and volumes under `~/.local/share/containers`.
+
+The user namespace maps UID 0 of the containers to the user who runs them
+(UID 1000) and UIDs 1 to 65536 to the range `/etc/subuid` reserves for that
+user (100000 to 165535). A container's root is therefore not root on the
+host, and the non-root user of the version 3 images (10001) becomes
+100000 + 10001 - 1 = 110000.
+
+### 7.2. Short names of the base images
+
+The first `podman build` stopped at the `FROM` line:
+
+```console
+$ podman build -f CA4/part1/chat/v3/Dockerfile -t cogsi-chat:v3 CA1/part1
+Error: creating build container: short-name "eclipse-temurin:21.0.13_9-jdk" did not resolve to an alias and no unqualified-search registries are defined in "/etc/containers/registries.conf"
+```
+
+Docker always completes `eclipse-temurin` to
+`docker.io/library/eclipse-temurin`. Podman does not assume a registry: an
+unqualified name could be served by any registry in a search list, so a
+name such as `nginx` could resolve to an image someone else published
+under that name elsewhere. Rather than changing the Dockerfiles,
+[`alternative/registries.conf`](alternative/registries.conf) declares
+aliases, each pinned to one registry:
+
+```toml
+[aliases]
+"eclipse-temurin" = "docker.io/library/eclipse-temurin"
+"nginx" = "docker.io/library/nginx"
+"registry" = "docker.io/library/registry"
+```
+
+and every command uses it through `CONTAINERS_REGISTRIES_CONF`, without
+changing the system configuration:
+
+```bash
+export CONTAINERS_REGISTRIES_CONF=$PWD/CA4/alternative/registries.conf
+```
+
+### 7.3. Part 1 with Podman
+
+The version 3 images are built with the same Dockerfiles and contexts:
+
+```bash
+podman build -f CA4/part1/chat/v3/Dockerfile -t cogsi-chat:v3 CA1/part1
+podman build -f CA4/part1/bookstore/v3/Dockerfile -t cogsi-bookstore:v3 CA1/part2
+podman images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' | grep cogsi
+```
+
+```console
+localhost/cogsi-bookstore:v3          265 MB
+localhost/cogsi-chat:v3               212 MB
+```
+
+- **Same Dockerfile features.** Buildah, Podman's build engine, supports
+  the multi-stage builds, `RUN --mount=type=cache` and `COPY --from` used
+  in Part 1.
+- **Ignore files.** Buildah also reads the Dockerfile-specific
+  `Dockerfile.dockerignore`. Checked with a context holding a
+  `secret.txt` that the ignore file excludes and a `COPY . /ctx`: neither
+  Docker nor Podman copied it.
+- **Sizes.** Podman reports the unpacked size of the image (212 MB for the
+  chat server), the sum of the layers that `docker history` lists. Docker's
+  291 MB for the same image also counts the compressed copy kept by the
+  containerd store (section 2).
+- **Names.** Local images get the prefix `localhost/`.
+
+Running the chat server rootless and connecting from the host:
+
+```bash
+podman run -d --name chat-podman -p 59010:59001 localhost/cogsi-chat:v3
+(sleep 1; echo carol; sleep 1; echo "hello podman"; sleep 1) | timeout 5 nc localhost 59010
+podman top chat-podman user huser args
+podman stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.PIDs}}' chat-podman
+```
+
+```console
+SUBMITNAME
+NAMEACCEPTED carol
+MESSAGE carol: hello podman
+USER        HUSER       COMMAND
+chat        110000      java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+NAME         CPU %       MEM USAGE / LIMIT  NET IO      PIDS
+chat-podman  10.40%      50.15MB / 16.63GB  0B / 720B   20
+```
+
+`podman top` shows both identities: `chat` (10001) inside the container,
+`110000` on the host. Even a root process in a rootless container is UID 1000
+on the host, an unprivileged user.
+
+Publishing works the same way. The local registry of section 4.8 is
+plain HTTP, which Podman only accepts with `--tls-verify=false` (Docker
+makes an exception for `localhost`):
+
+```bash
+podman tag localhost/cogsi-chat:v3 localhost:5000/rmotafreitas/cogsi-chat:1.0-v3-podman
+podman push --tls-verify=false localhost:5000/rmotafreitas/cogsi-chat:1.0-v3-podman
+curl -s localhost:5000/v2/rmotafreitas/cogsi-chat/tags/list
+```
+
+```console
+{"name":"rmotafreitas/cogsi-chat","tags":["1.0","1.0-v1","1.0-v2","1.0-v3","1.0-v3-podman","latest","v1","v2","v3"]}
+```
+
+This is the ninth tag of the repository, next to the eight of section 4.8.
+
+### 7.4. Part 2 with Quadlet
+
+Podman has no daemon to restart containers, to run their health checks
+or to start them in order. These jobs go to systemd. Quadlet is a systemd
+generator, shipped with Podman: it reads `.container`, `.network` and
+`.volume` files from `~/.config/containers/systemd/` and generates one
+systemd service for each, which runs `podman run` with the matching
+options.
+
+[`quadlet/cogsi-db.container`](alternative/quadlet/cogsi-db.container):
+
+```ini
+[Unit]
+Description=CA4 alternative - H2 database server (db)
+
+[Container]
+Image=localhost/cogsi-ca4-h2:2.4.240
+ContainerName=db
+Network=cogsi-backend.network
+Volume=cogsi-h2-data.volume:/var/lib/h2
+EnvironmentFile=%h/.config/cogsi-ca4/db.env
+Secret=cogsi-db-password,type=env,target=DB_PASSWORD
+HealthCmd=/usr/local/bin/h2-healthcheck
+HealthInterval=15s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=30s
+HealthStartupCmd=/usr/local/bin/h2-healthcheck
+HealthStartupInterval=2s
+Notify=healthy
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
+```
+
+[`cogsi-web.container`](alternative/quadlet/cogsi-web.container) adds the
+dependency on `db`, both networks and its own health check:
+
+```ini
+[Unit]
+Requires=cogsi-db.service
+After=cogsi-db.service
+
+[Container]
+Image=localhost/cogsi-ca4-bookstore:1.0.0
+ContainerName=web
+Network=cogsi-backend.network
+Network=cogsi-frontend.network
+EnvironmentFile=%h/.config/cogsi-ca4/web.env
+Secret=cogsi-db-password,type=env,target=SPRING_DATASOURCE_PASSWORD
+HealthCmd=sh -c 'wget -qO- http://127.0.0.1:$SERVER_PORT/actuator/health | grep -q "\"status\":\"UP\""'
+...
+Notify=healthy
+```
+
+and [`cogsi-proxy.container`](alternative/quadlet/cogsi-proxy.container)
+depends on `web` and publishes the port
+(`PublishPort=${PROXY_PUBLISHED_PORT}:${NGINX_PORT}`, expanded by systemd from
+the `EnvironmentFile=` of its `[Service]` section).
+
+How each Compose requirement is met:
+
+| Requirement | Compose (section 5) | Quadlet |
+| --- | --- | --- |
+| Three services | `services:` | one `.container` per service, `ContainerName=` gives the DNS name |
+| Networks and name resolution | `networks:`, embedded DNS 127.0.0.11 | `.network` files, netavark with aardvark-dns on each network's gateway |
+| `db` isolated | `internal: true` | `Internal=true` |
+| Volume | `volumes: h2-data` | `cogsi-h2-data.volume`, `Volume=cogsi-h2-data.volume:/var/lib/h2` |
+| Health checks | `healthcheck:` | `HealthCmd=` and friends, run by systemd timers |
+| `web` after `db` is healthy | `depends_on: condition: service_healthy` | `Notify=healthy` in `db` + `Requires=`/`After=cogsi-db.service` in `web` |
+| `proxy` after `web` is healthy | the same | the same, one level up |
+| Environment variables | `.env` interpolated into `environment:` | `podman.env` -> one `EnvironmentFile=` per service, written by `up.sh` |
+| Database password | variable in `.env` | Podman secret (below) |
+| Restart | `restart: unless-stopped` | `Restart=on-failure` of systemd |
+| Memory and CPU limits | `deploy.resources.limits` | `PodmanArgs=--memory=${WEB_MEM_LIMIT} --cpus=${WEB_CPUS}` (Podman 5.4's Quadlet has no dedicated key), expanded by systemd from `limits.env` |
+
+`Notify=healthy` is what makes the order work. The container runs with
+`podman run --sdnotify=healthy` and the unit is `Type=notify`: Podman tells
+systemd that the service has started only when the health check passes for
+the first time. Until then, systemd keeps every unit that is `After=` it
+waiting. The generated service shows it:
+
+```console
+$ systemctl --user cat cogsi-web.service | grep -E '^(Requires|After|Type|ExecStart)'
+Requires=cogsi-db.service
+After=cogsi-db.service
+Requires=cogsi-backend-network.service
+After=cogsi-backend-network.service
+Requires=cogsi-frontend-network.service
+After=cogsi-frontend-network.service
+Type=notify
+ExecStart=/usr/bin/podman run --name web --cidfile=%t/%N.cid --replace --rm --cgroups=split --network cogsi-backend --network cogsi-frontend --sdnotify=healthy -d --env-file %h/.config/cogsi-ca4/web.env --secret cogsi-db-password,type=env,target=SPRING_DATASOURCE_PASSWORD --health-cmd ...
+```
+
+#### Configuration and secret
+
+[`up.sh`](alternative/up.sh) reads
+[`podman.env`](alternative/podman.env.example), the same variables as
+`part2/.env.example`, and writes `~/.config/cogsi-ca4/db.env`, `web.env` and
+`proxy.env` (mode 0600), doing the mapping that Compose does with
+interpolation (`DB_USER` becomes `DB_USER` for `db` and
+`SPRING_DATASOURCE_USERNAME` for `web`, and so on). The password is not in
+any of them: `up.sh` asks for it once and stores it as a Podman secret,
+
+```bash
+printf '%s' "$DB_PASSWORD" | podman secret create cogsi-db-password -
+```
+
+and the two units read it with `Secret=...,type=env,target=...`. The
+process sees it as an environment variable, but it is not part of the
+container's configuration, so `podman inspect` does not show it (with
+Compose, `docker inspect` shows every variable):
+
+```console
+$ podman secret ls --format '{{.Name}} {{.Driver}}'
+cogsi-db-password file
+$ podman inspect web --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -c PASSWORD
+0
+$ podman exec web sh -c 'test -n "$SPRING_DATASOURCE_PASSWORD" && echo "password visible to the process"'
+password visible to the process
+```
+
+#### Starting the environment
+
+```bash
+DB_PASSWORD=... CA4/alternative/up.sh
+```
+
+```console
+[BUILD] images
+[SECRET] cogsi-db-password
+[ENV] /home/rmotafreitas/.config/cogsi-ca4
+[UNITS] /home/rmotafreitas/.config/containers/systemd
+[START] cogsi-proxy.service (and its dependencies)
+● cogsi-db.service - CA4 alternative - H2 database server (db)
+     Active: active (running) since Thu 2026-11-05 10:51:03 WET; 6s ago
+● cogsi-web.service - CA4 alternative - Bookstore (web)
+     Active: active (running) since Thu 2026-11-05 10:51:09 WET; 585ms ago
+● cogsi-proxy.service - CA4 alternative - Nginx reverse proxy (proxy)
+     Active: active (running) since Thu 2026-11-05 10:51:10 WET; 14ms ago
+NAMES       STATUS                           PORTS
+db          Up 8 seconds (healthy)           9092/tcp
+web         Up 6 seconds (healthy)           8080/tcp
+proxy       Up Less than a second (healthy)  0.0.0.0:8090->80/tcp
+```
+
+Only `cogsi-proxy.service` is started; systemd starts its dependencies first.
+The journal shows each unit waiting for the previous one to be healthy:
+
+```console
+$ journalctl --user -u cogsi-db.service -u cogsi-web.service -u cogsi-proxy.service -o short-precise | grep -E 'Starting|Started'
+10:51:02.339517 systemd[991]: Starting cogsi-db.service - CA4 alternative - H2 database server (db)...
+10:51:03.774735 systemd[991]: Started cogsi-db.service - CA4 alternative - H2 database server (db).
+10:51:03.776184 systemd[991]: Starting cogsi-web.service - CA4 alternative - Bookstore (web)...
+10:51:04.935272 web[3001093]: ... Starting BookstoreApplication
+10:51:08.659081 web[3001093]: ... Started BookstoreApplication
+10:51:09.729524 systemd[991]: Started cogsi-web.service - CA4 alternative - Bookstore (web).
+10:51:09.731163 systemd[991]: Starting cogsi-proxy.service - CA4 alternative - Nginx reverse proxy (proxy)...
+10:51:10.303204 systemd[991]: Started cogsi-proxy.service - CA4 alternative - Nginx reverse proxy (proxy).
+```
+
+`web` was started only after `db` was declared started (healthy), and
+`proxy` one second after the Bookstore finished starting, when its health
+check passed. The proxy is published on 8090, so the Docker environment of
+section 5 can run on 8080 at the same time.
+
+#### The proxy and Podman's DNS
+
+The first request through the proxy failed:
+
+```console
+$ curl -s localhost:8090/books/3
+<html>
+<head><title>502 Bad Gateway</title></head>
+...
+```
+
+The template then had `resolver 127.0.0.11`, Docker's embedded DNS
+server. Podman's DNS server (aardvark-dns) answers on the gateway of each
+network:
+
+```console
+$ podman exec proxy cat /etc/resolv.conf
+search dns.podman
+nameserver 10.89.1.1
+$ docker exec cogsi-ca4-proxy-1 cat /etc/resolv.conf | grep nameserver
+nameserver 127.0.0.11
+```
+
+The fix went into the proxy image of Part 2 (commit "take the proxy
+resolver from the container resolv.conf", section 5.6): the entrypoint of
+the nginx image writes the name servers of `/etc/resolv.conf` into
+`NGINX_LOCAL_RESOLVERS`, so the same image renders `resolver 127.0.0.11`
+under Docker and `resolver 10.89.1.1` under Podman. The alternative found a
+portability bug that Docker alone would never have shown.
+
+```console
+$ podman exec proxy grep resolver /etc/nginx/conf.d/default.conf
+resolver 10.89.1.1 valid=10s ipv6=off;
+$ curl -s -X POST localhost:8090/books -H 'Content-Type: application/json' -d '{"title":"Stored by Podman","author":"COGSI","price":9.9}'
+{"author":"COGSI","id":3,"price":9.9,"title":"Stored by Podman"}
+$ curl -s localhost:8090/books/3
+{"_links":{"self":{"href":"http://localhost:8090/books/3"},"books":{"href":"http://localhost:8090/books"}},"author":"COGSI","id":3,"price":9.9,"title":"Stored by Podman"}
+```
+
+#### Name resolution, isolation and health checks
+
+```console
+$ podman exec web getent hosts db
+10.89.0.2         db.dns.podman  db.dns.podman db
+$ podman exec proxy getent hosts web
+10.89.1.2         web.dns.podman  web.dns.podman web
+$ podman exec proxy getent hosts db || echo "proxy: db not resolvable"
+proxy: db not resolvable
+$ podman exec db sh -c 'wget -q -T 3 -O /dev/null https://repo1.maven.org || echo "db -> internet blocked"'
+wget: bad address 'repo1.maven.org'
+db -> internet blocked
+$ podman network inspect cogsi-backend cogsi-frontend --format '{{.Name}} internal={{.Internal}} subnet={{range .Subnets}}{{.Subnet}} gw={{.Gateway}}{{end}} dns={{.DNSEnabled}}'
+cogsi-backend internal=true subnet=10.89.0.0/24 gw=10.89.0.1 dns=true
+cogsi-frontend internal=false subnet=10.89.1.0/24 gw=10.89.1.1 dns=true
+```
+
+The same topology as section 5.7: `proxy` cannot resolve `db`, and `db` has
+no route outside. Names also resolve with the `dns.podman` domain.
+
+Each health check is a transient systemd timer, one per container:
+
+```console
+$ systemctl --user list-timers --no-legend | grep -E '[0-9a-f]{64}' | awk '{print $(NF-1)}'
+be57df4c9f0176af39a0dff519645ae09bf0e678bce5933d7b91d2f84d357edb-5e34d43c68588e75.timer
+646b6652995319b83981231feb20ed36529e90a0fe5d6b9e951a544fb558803f-4a76e4a836fed6e1.timer
+6e83db4ae2b1b2ca568cdf66c81716621f24cd0d80b7375a9a20118f07d48112-4031789966081e5f.timer
+$ podman ps --format '{{.ID}} {{.Names}}'
+be57df4c9f01 db
+646b66529953 web
+6e83db4ae2b1 proxy
+```
+
+The timer names start with the container IDs. Without systemd, nothing
+would run the checks periodically: `podman healthcheck run <container>`
+would have to be called by hand or by cron.
+
+#### Persistence and resources
+
+```console
+$ systemctl --user stop cogsi-proxy.service cogsi-web.service cogsi-db.service
+$ podman ps -a --format '{{.Names}}' | grep -E '^(db|web|proxy)$' || echo "no containers left"
+no containers left
+$ podman volume ls --format '{{.Name}}'
+cogsi-h2-data
+$ systemctl --user start cogsi-proxy.service
+$ curl -s localhost:8090/books/3
+{"_links":{"self":{"href":"http://localhost:8090/books/3"},"books":{"href":"http://localhost:8090/books"}},"author":"COGSI","id":3,"price":9.9,"title":"Stored by Podman"}
+```
+
+Quadlet runs every container with `--rm`, so stopping a unit deletes its
+container; the data written through the proxy survived in the volume.
+
+```console
+$ podman stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
+NAME        CPU %       MEM USAGE / LIMIT  NET IO             BLOCK IO    PIDS
+db          5.44%       42.47MB / 536.9MB  31.4kB / 51.52kB   0B / 0B     27
+web         30.13%      224.3MB / 805.3MB  55.49kB / 31.55kB  0B / 0B     29
+proxy       0.40%       8.737MB / 134.2MB  1.694kB / 1.521kB  0B / 0B     13
+```
+
+Podman prints sizes in decimal units: 536.9 MB is the 512 MiB limit.
+
+The units keep the limits of Part 2 (section 5.5), applied by a rootless
+Podman through cgroups v2:
+
+```console
+$ for c in db web proxy; do echo "$c $(podman inspect $c --format 'memory={{.HostConfig.Memory}} cpuQuota={{.HostConfig.CpuQuota}} cpuPeriod={{.HostConfig.CpuPeriod}}')"; done
+db memory=536870912 cpuQuota=100000 cpuPeriod=100000
+web memory=805306368 cpuQuota=150000 cpuPeriod=100000
+proxy memory=134217728 cpuQuota=50000 cpuPeriod=100000
+$ podman exec web sh -c 'java -XX:MaxRAMPercentage=75 -XX:+PrintFlagsFinal -version | grep " MaxHeapSize "'
+   size_t MaxHeapSize          = 603979776     {product} {ergonomic}
+```
+
+512 MiB / 1 CPU, 768 MiB / 1.5 CPUs and 128 MiB / 0.5 CPU, and the same
+576 MiB heap as under Compose. (The first version of the units had no
+limits; they were added with `PodmanArgs=` after the review of this
+section.)
+
+`ps` on the host shows the two JVMs as UID 110000, the mapped 10001:
+
+```console
+$ ps -o user,pid,args -C java | grep -E 'h2|bookstore'
+110000   3000864 java -Xmx256m -cp /opt/h2/h2.jar org.h2.tools.Server ...
+110000   3001107 java -jar /opt/bookstore/bookstore.jar
+```
+
+### 7.5. The same `compose.yaml` with podman-compose
+
+podman-compose reads Compose files and runs Podman commands. The Part 2
+file worked unchanged (another project name and port, to coexist with the
+Quadlet environment):
+
+```bash
+PROXY_PUBLISHED_PORT=8091 podman-compose -f "$PWD/CA4/part2/compose.yaml" -p cogsipc up -d
+podman ps --filter label=io.podman.compose.project=cogsipc --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+for c in cogsipc_db_1 cogsipc_web_1 cogsipc_proxy_1; do
+  echo "$c started $(podman inspect $c --format '{{.State.StartedAt}}' | cut -c12-23)"; done
+```
+
+```console
+NAMES            STATUS                   PORTS
+cogsipc_db_1     Up 21 seconds (healthy)  9092/tcp
+cogsipc_web_1    Up 21 seconds (healthy)  8080/tcp
+cogsipc_proxy_1  Up 20 seconds (healthy)  0.0.0.0:8091->80/tcp
+cogsipc_db_1 started 10:53:38.461
+cogsipc_web_1 started 10:53:38.838
+cogsipc_proxy_1 started 10:53:39.695
+```
+
+All three became healthy, but podman-compose 1.3.0 started `web` 0.4 s after
+`db` and `proxy` 0.9 s after `web`, without waiting for the health checks:
+it followed `depends_on` for the order only and ignored
+`condition: service_healthy`. It worked because the Bookstore takes several
+seconds to open its connection pool, by which time H2 was ready. This is
+why Quadlet was chosen for the implementation and podman-compose is only
+the comparison. (The path to the file must be absolute: with
+`-f CA4/part2/compose.yaml` podman-compose 1.3.0 fails with
+`FileNotFoundError`.)
+
+### 7.6. Requirements not covered and limitations
+
+| Requirement | Status with Podman | Why |
+| --- | --- | --- |
+| Part 1: image per application, three versions, ignore files | met for version 3, the others build the same way | the Dockerfiles are OCI-compatible; only version 3 was rebuilt with Podman, as it is the one used later |
+| Part 1: comparison, history, monitoring | `podman history`, `podman stats` exist; the full comparison was not repeated | it measures the images, which are the same; the size differences are explained in 7.3 |
+| Part 1: non-root | met, and more: rootless by default | 7.1, 7.3 |
+| Publish to Docker Hub | same limitation as Part 1 | not logged in on the machine; `podman push docker.io/rmotafreitas/...` after `podman login` |
+| Part 2: start order gated by health | met only when started through systemd | `podman start db web proxy` by hand ignores the order; the order lives in the units, not in the containers |
+| Part 2: configuration with variables | met, with a translation step | Quadlet has no interpolation like Compose: `up.sh` writes one environment file per service from `podman.env` |
+| Part 2: health checks | met while the systemd user session runs | the checks are systemd timers; containers started at boot need lingering (`loginctl enable-linger`, already enabled on this host) |
+| Memory and CPU limits | met, rootless | needs the `memory` and `cpu` cgroup controllers delegated to the user (`cgroup.controllers` of `user@1000.service`: `cpu memory pids` on this host); otherwise Podman ignores the limits |
+| Ports below 1024 | not used | rootless Podman cannot bind them unless `net.ipv4.ip_unprivileged_port_start` is lowered; the proxy listens on 80 inside the container and is published on 8090 |
+| Multi-host, Windows/macOS | not covered | Podman runs containers on Linux; on Windows and macOS it uses a Linux VM (`podman machine`), as Docker Desktop does |
+
+### 7.7. Docker and Podman compared on this assignment
+
+| Aspect | Docker (sections 4-5) | Podman (this section) |
+| --- | --- | --- |
+| Daemon | `dockerd` as root; the CLI talks to it | none; each container is a child of `conmon` |
+| Privileges | root in a container is root on the host (no user namespace by default) | rootless: root in a container is UID 1000 on the host, 10001 is 110000 |
+| Dockerfiles | BuildKit | Buildah: the same Dockerfiles, cache mounts and ignore files worked unchanged |
+| Image names | `eclipse-temurin` means Docker Hub | short names refused unless aliased (7.2) |
+| Multi-container | Compose, one declarative file | Quadlet units (systemd), or podman-compose without health-gated order |
+| Start order on health | `depends_on: service_healthy` | `Notify=healthy` + `Requires=`/`After=` |
+| Health checks run by | the daemon | systemd timers |
+| DNS server in the containers | 127.0.0.11 | the network gateway (`10.89.x.1`) |
+| Secrets | variables visible in `docker inspect` (or Compose secrets as files) | `podman secret`, injected as variables but not in `podman inspect` |
+| Start at boot | restart policies of the daemon | systemd units (`WantedBy=default.target`) |
+| Plain-HTTP registry on localhost | accepted | `--tls-verify=false` |
+
+Moving from Docker to Podman did not change any image. It changed where
+the runtime responsibilities live: what the Docker daemon did (ordering,
+health scheduling, restarts) moved to systemd, which is more explicit and
+integrates with the host's service manager, but needs more files than one
+`compose.yaml`. In exchange, no process runs as root at any time, the
+password is no longer readable through `inspect`, and the test under a
+second runtime found a hard-coded Docker assumption in the proxy.
+
+To stop the environment (`--purge` also deletes the volume, the secret and
+the networks):
+
+```bash
+CA4/alternative/down.sh            # or: CA4/alternative/down.sh --purge
+```
+
+> The first `down.sh` stopped only the three container units. A start after
+> `--purge` then failed with `Error: unable to find network with name or ID
+> cogsi-backend: network not found`: the units that create the networks
+> and the volume are oneshot services that stay `active (exited)`, so
+> systemd did not run them again after Podman had deleted their objects.
+> `down.sh` now stops them too, and the sequence `down.sh --purge` then
+> `up.sh` was tested again from scratch.
 
 ---
 

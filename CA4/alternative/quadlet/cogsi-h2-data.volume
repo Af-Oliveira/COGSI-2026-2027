@@ -1,0 +1,3 @@
+# Named volume for the H2 database files.
+[Volume]
+VolumeName=cogsi-h2-data
