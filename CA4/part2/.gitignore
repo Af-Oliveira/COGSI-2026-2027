@@ -1,0 +1,2 @@
+# Local environment of docker compose (holds the database password)
+.env
