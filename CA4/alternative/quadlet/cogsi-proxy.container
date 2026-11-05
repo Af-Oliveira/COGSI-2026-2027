@@ -15,10 +15,13 @@ HealthInterval=15s
 HealthTimeout=5s
 HealthRetries=3
 HealthStartPeriod=10s
+# Memory and CPU limits, as in compose.yaml; expanded by systemd from limits.env.
+PodmanArgs=--memory=${PROXY_MEM_LIMIT} --cpus=${PROXY_CPUS}
 Notify=healthy
 
 [Service]
 EnvironmentFile=%h/.config/cogsi-ca4/proxy.env
+EnvironmentFile=%h/.config/cogsi-ca4/limits.env
 Restart=on-failure
 TimeoutStartSec=120
 

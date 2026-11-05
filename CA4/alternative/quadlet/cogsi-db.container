@@ -19,9 +19,12 @@ HealthRetries=3
 HealthStartPeriod=30s
 HealthStartupCmd=/usr/local/bin/h2-healthcheck
 HealthStartupInterval=2s
+# Memory and CPU limits, as in compose.yaml; expanded by systemd from limits.env.
+PodmanArgs=--memory=${DB_MEM_LIMIT} --cpus=${DB_CPUS}
 Notify=healthy
 
 [Service]
+EnvironmentFile=%h/.config/cogsi-ca4/limits.env
 Restart=on-failure
 TimeoutStartSec=180
 

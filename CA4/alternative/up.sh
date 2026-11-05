@@ -4,7 +4,8 @@
 # -----------------------------------------------------------------------------
 #  1. builds the db, web and proxy images with Podman (same Dockerfiles)
 #  2. stores the database password as a Podman secret
-#  3. writes one environment file per service from podman.env
+#  3. writes one environment file per service, and the resource limits,
+#     from podman.env
 #  4. installs the Quadlet units and starts proxy.service, which pulls in
 #     web.service and db.service in order, each one waiting for the previous
 #     to be healthy
@@ -67,6 +68,15 @@ UPSTREAM_HOST=$PROXY_UPSTREAM_HOST
 UPSTREAM_PORT=$WEB_PORT
 PROXY_READ_TIMEOUT=$PROXY_READ_TIMEOUT
 PROXY_PUBLISHED_PORT=$PROXY_PUBLISHED_PORT
+END
+
+cat >"$ENV_DIR/limits.env" <<END
+DB_MEM_LIMIT=$DB_MEM_LIMIT
+DB_CPUS=$DB_CPUS
+WEB_MEM_LIMIT=$WEB_MEM_LIMIT
+WEB_CPUS=$WEB_CPUS
+PROXY_MEM_LIMIT=$PROXY_MEM_LIMIT
+PROXY_CPUS=$PROXY_CPUS
 END
 
 echo "[UNITS] $UNIT_DIR"

@@ -19,9 +19,12 @@ HealthRetries=3
 HealthStartPeriod=60s
 HealthStartupCmd=sh -c 'wget -qO- http://127.0.0.1:$SERVER_PORT/actuator/health | grep -q "\"status\":\"UP\""'
 HealthStartupInterval=2s
+# Memory and CPU limits, as in compose.yaml; expanded by systemd from limits.env.
+PodmanArgs=--memory=${WEB_MEM_LIMIT} --cpus=${WEB_CPUS}
 Notify=healthy
 
 [Service]
+EnvironmentFile=%h/.config/cogsi-ca4/limits.env
 Restart=on-failure
 TimeoutStartSec=300
 
