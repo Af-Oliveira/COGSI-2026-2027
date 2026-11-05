@@ -1477,6 +1477,116 @@ $ docker exec cogsi-ca4-db-1 ls -ln /var/lib/h2
 > so the two sample books appear again after each restart with new ids. This
 > is the behaviour of the application's `DataInitializer`, not data loss.
 
+### 5.5. web - the Bookstore
+
+```yaml
+  web:
+    image: ${IMAGE_NAMESPACE:-rmotafreitas}/cogsi-ca4-bookstore:${APP_VERSION:-1.0.0}
+    build:
+      context: ../../CA1/part2
+      dockerfile: ../../CA4/part1/bookstore/v3/Dockerfile
+    environment:
+      SERVER_PORT: ${WEB_PORT:-8080}
+      SPRING_DATASOURCE_URL: jdbc:h2:tcp://db:${H2_PORT:-9092}/./${DB_NAME:-bookstore}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:?set DB_USER in .env}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: ${JPA_DDL_AUTO:-update}
+      SPRING_JPA_SHOW_SQL: ${JPA_SHOW_SQL:-false}
+      SPRING_H2_CONSOLE_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: ${WEB_JAVA_OPTS:--XX:MaxRAMPercentage=75}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend, frontend]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${SERVER_PORT}/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+```
+
+- **No change to the application.** Spring Boot reads its properties from
+  environment variables with relaxed binding (`SPRING_DATASOURCE_URL` is
+  `spring.datasource.url`), and they take precedence over the
+  `application.properties` inside the JAR. CA2 wrote an
+  `/etc/bookstore/application.properties` file; here the same settings are
+  plain variables.
+- **`depends_on: condition: service_healthy`.** Compose creates `web` only
+  when the health check of `db` passes. Without the condition, `depends_on`
+  only orders the creation of the containers, and the Bookstore could try
+  to open its connection pool before H2 accepts connections.
+- **Health check.** `/actuator/health` aggregates the health of the
+  datasource, so it is `UP` only if the application is up **and** its
+  connection to H2 works. `wget` is BusyBox's, already in the Alpine image.
+  `$$` stops Compose from interpolating `SERVER_PORT` from `.env`, so
+  the shell of the container expands it.
+- **JVM sizing.** `-XX:MaxRAMPercentage=75` gives the heap 75% of the
+  container's memory limit when one is set, instead of the JVM default of
+  25% (section 4.6).
+- **The image is the non-root version 3** of Part 1 (UID 10001).
+
+```console
+$ C logs web | grep -E 'Picked up|HikariPool-1 - Added'
+web-1  | Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+web-1  | ... HikariPool-1 - Added connection conn0: url=jdbc:h2:tcp://db:9092/./bookstore user=BOOKSTORE
+$ curl -s -X POST localhost:8080/books -H 'Content-Type: application/json' \
+    -d '{"title":"Persisted in H2","author":"COGSI","price":12.5}'
+{"author":"COGSI","id":3,"price":12.5,"title":"Persisted in H2"}
+```
+
+#### Start order
+
+Starting from nothing (`down` then `up -d --wait`):
+
+```console
+ Container cogsi-ca4-db-1 Started
+ Container cogsi-ca4-db-1 Waiting
+ Container cogsi-ca4-db-1 Healthy
+ Container cogsi-ca4-web-1 Started
+ Container cogsi-ca4-web-1 Waiting
+ Container cogsi-ca4-web-1 Healthy
+ Container cogsi-ca4-proxy-1 Started
+ ...
+ Container cogsi-ca4-proxy-1 Healthy
+```
+
+```console
+$ for s in db web proxy; do echo "$s started $(docker inspect cogsi-ca4-$s-1 --format '{{.State.StartedAt}}' | cut -c12-23)"; done
+db started 10:54:22.286
+web started 10:54:24.918
+proxy started 10:54:31.553
+$ docker inspect cogsi-ca4-web-1 --format '{{json .State.Health}}'     # first probes, summarised
+10:54:27.041 exit 1
+10:54:29.077 exit 1
+10:54:31.114 exit 0
+```
+
+`web` started 2.6 s after `db`, once the SQL check passed. Its first two
+probes failed while Spring Boot was starting (the failures inside
+`start_period` do not count towards `retries`), the third passed at
+10:54:31.114, and `proxy` started 0.4 s later.
+
+#### The health check follows the database
+
+```console
+$ C stop db
+$ curl -s -w ' HTTP %{http_code}\n' localhost:8080/actuator/health
+{"groups":["liveness","readiness"],"status":"DOWN"} HTTP 503
+$ C ps --format '{{.Service}}\t{{.Status}}'
+web     Up About a minute (unhealthy)
+$ C start db
+$ curl -s -w ' HTTP %{http_code}\n' localhost:8080/actuator/health
+{"groups":["liveness","readiness"],"status":"UP"} HTTP 200
+```
+
+The connection pool reconnects by itself when `db` comes back. Docker
+only reports `unhealthy`: a restart policy reacts to the process exiting,
+not to the health status, so an unhealthy container is not restarted.
+`depends_on` acts only when the environment starts.
+
 ---
 
 ## 6. Alternative solution - analysis and design
