@@ -1803,6 +1803,84 @@ Every value that may change between environments is a variable read from
 > (`/run/secrets/...`) instead. The Podman implementation (section 7) uses
 > Podman secrets.
 
+### 5.9. Publishing the images
+
+> Publish the images to Docker Hub
+
+Each service has both `build:` and `image:`. `docker compose build` tags the
+result with the `image:` name, `docker compose push` sends it to the registry
+in that name, and `docker compose pull` downloads it on another machine.
+The registry and account are the `IMAGE_NAMESPACE` variable, so the same
+file publishes anywhere; the tags are the application versions
+(`APP_VERSION`, `PROXY_VERSION`) and the H2 release (`H2_VERSION`):
+
+```console
+$ IMAGE_NAMESPACE=docker.io/rmotafreitas docker compose -f CA4/part2/compose.yaml config --images
+docker.io/rmotafreitas/cogsi-ca4-h2:2.4.240
+docker.io/rmotafreitas/cogsi-ca4-bookstore:1.0.0
+docker.io/rmotafreitas/cogsi-ca4-proxy:1.0.0
+```
+
+As in Part 1 (section 4.8), the machine is not logged in to Docker Hub, so
+the push was made to the local registry; the Docker Hub push is the same
+two commands with the default namespace once `docker login` is done:
+
+```bash
+docker login -u rmotafreitas
+docker compose -f CA4/part2/compose.yaml build && docker compose -f CA4/part2/compose.yaml push
+```
+
+With the local registry of section 4.8:
+
+```bash
+export IMAGE_NAMESPACE=localhost:5000/rmotafreitas
+docker compose -f CA4/part2/compose.yaml build
+docker compose -f CA4/part2/compose.yaml push
+for r in cogsi-ca4-h2 cogsi-ca4-bookstore cogsi-ca4-proxy; do curl -s localhost:5000/v2/rmotafreitas/$r/tags/list; echo; done
+```
+
+```console
+ localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240 Pushed
+ localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0 Pushed
+ localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0 Pushed
+{"name":"rmotafreitas/cogsi-ca4-h2","tags":["2.4.240"]}
+{"name":"rmotafreitas/cogsi-ca4-bookstore","tags":["1.0.0"]}
+{"name":"rmotafreitas/cogsi-ca4-proxy","tags":["1.0.0"]}
+```
+
+To check that the published images are enough to run the environment, the
+local copies were deleted and a second project (`-p cogsi-ca4-pulled`, its
+own networks and volume, the proxy on port 8095) was started without
+building:
+
+```bash
+export IMAGE_NAMESPACE=localhost:5000/rmotafreitas PROXY_PUBLISHED_PORT=8095
+for r in cogsi-ca4-h2:2.4.240 cogsi-ca4-bookstore:1.0.0 cogsi-ca4-proxy:1.0.0; do docker rmi localhost:5000/rmotafreitas/$r; done
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled up -d --pull always --no-build --wait
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+curl -s localhost:8095/books
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled down -v
+```
+
+```console
+ Image localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240 Pulling
+ Image localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0 Pulling
+ Image localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0 Pulling
+ ...
+SERVICE   IMAGE                                                   STATUS                    PORTS
+db        localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240        Up 11 seconds (healthy)   9092/tcp
+proxy     localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0       Up 2 seconds (healthy)    0.0.0.0:8095->80/tcp, [::]:8095->80/tcp
+web       localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0   Up 9 seconds (healthy)    8080/tcp
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"}, ...]
+```
+
+`--pull always` forces the download even if an image with that name exists
+locally, and `--no-build` makes Compose fail rather than build if an image is
+missing, so the environment came only from the registry. The new project
+started with an empty volume, so the database was created by the
+entrypoint, and the API answered with the sample data. The three images are
+also attached to the GitHub release of the tag `ca4-part2` (section 8).
+
 ---
 
 ## 6. Alternative solution - analysis and design
