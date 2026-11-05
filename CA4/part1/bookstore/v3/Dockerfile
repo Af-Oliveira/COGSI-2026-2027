@@ -42,6 +42,12 @@ RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination 
 # Runtime stage
 # ---------------------------------------------------------------------------
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+
+# Dedicated system user, without a home or a login shell, with a fixed
+# numeric UID (see the chat server's Dockerfile).
+RUN addgroup -S -g 10001 bookstore \
+ && adduser -S -D -H -u 10001 -G bookstore -s /sbin/nologin bookstore
+
 WORKDIR /opt/bookstore
 
 # Least to most frequently changed: a code change only replaces the last
@@ -50,6 +56,10 @@ COPY --from=build /extracted/dependencies/ ./
 COPY --from=build /extracted/spring-boot-loader/ ./
 COPY --from=build /extracted/snapshot-dependencies/ ./
 COPY --from=build /extracted/application/ ./
+
+# The application files stay owned by root (read-only for the user). Tomcat
+# writes only to /tmp, which is writable by every user.
+USER 10001:10001
 
 EXPOSE 8080
 
