@@ -727,3 +727,191 @@ Reading the two histories from the bottom:
   `RUN` lines that use them (`RUN |2 REPO_URL=... REPO_REF=main`).
 - **The Bookstore** shows the same pattern, with its four Spring Boot layers
   in version 3 (section 4.3).
+
+### 4.6. Resource usage
+
+> Monitor your container's resource usage in real time. Observe CPU, memory,
+> network, and disk I/O activity while the container runs
+
+`docker stats` reads the cgroup counters of each container and refreshes
+them every second. Without arguments it streams all the running containers;
+`--no-stream` prints one sample, which is what is recorded below. The
+Bookstore was started with limits, so that the `LIMIT` column and the CPU
+quota are visible:
+
+```bash
+docker run -d --name bookstore-v3 --cpus 1.5 --memory 512m -p 18083:8080 cogsi-bookstore:v3
+F='{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
+docker stats --no-stream --format "table $F" bookstore-v3 chat-v3
+```
+
+```console
+NAME           CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
+bookstore-v3   15.98%    219.6MiB / 512MiB     42.90%    3.59kB / 1.13kB   135kB / 32.8kB   30
+chat-v3        0.15%     50.43MiB / 15.48GiB   0.32%     4.13kB / 616B     4.1kB / 119kB    20
+```
+
+Load on the Bookstore: 6000 `GET /books` with 32 parallel clients, then 300
+`POST /books`, sampled every second in a second terminal:
+
+```bash
+for i in $(seq 1 6); do docker stats --no-stream --format "$F" bookstore-v3; sleep 1; done
+seq 1 6000 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:18083/books | sort | uniq -c
+seq 1 300 | xargs -P 8 -I{} curl -s -o /dev/null -X POST localhost:18083/books \
+  -H 'Content-Type: application/json' -d '{"title":"Load test","author":"COGSI","price":1.0}'
+```
+
+```console
+   6000 200
+bookstore-v3  151.14%  241.3MiB / 512MiB  47.14%  196kB / 207kB    135kB / 49.2kB  55
+bookstore-v3  150.56%  250MiB / 512MiB    48.83%  427kB / 463kB    135kB / 49.2kB  65
+bookstore-v3  152.35%  251.8MiB / 512MiB  49.17%  672kB / 730kB    135kB / 49.2kB  65
+bookstore-v3  151.67%  255.6MiB / 512MiB  49.92%  940kB / 1.02MB   135kB / 61.4kB  65
+bookstore-v3  150.28%  259.1MiB / 512MiB  50.61%  1.24MB / 1.35MB  135kB / 61.4kB  65
+bookstore-v3  151.46%  262.2MiB / 512MiB  51.21%  1.56MB / 1.7MB   135kB / 73.7kB  65
+```
+
+and after the load:
+
+```console
+NAME           CPU %     MEM USAGE / LIMIT   MEM %     NET I/O           BLOCK I/O      PIDS
+bookstore-v3   0.17%     275.6MiB / 512MiB   53.84%    3.11MB / 3.31MB   135kB / 86kB   65
+```
+
+Load on the chat server: 20 clients connected at the same time, each sending
+50 messages that the server broadcasts to all the others:
+
+```console
+NAME      CPU %     MEM USAGE / LIMIT     NET I/O        BLOCK I/O       PIDS
+chat-v3   0.15%     50.43MiB / 15.48GiB   4.2kB / 616B   4.1kB / 147kB   20     <- idle
+chat-v3   0.15%     62.62MiB / 15.48GiB   99.9kB / 790kB 4.1kB / 147kB   51     <- 20 clients
+```
+
+```console
+$ docker top chat-v3 -o user,pid,nlwp,rss,args
+USER     PID       NLWP   RSS     COMMAND
+10001    2946805   49     83072   java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+```
+
+What the samples show:
+
+- **CPU.** Under load the Bookstore stays at 150%, exactly the quota set by
+  `--cpus 1.5` (1.5 CPUs out of 12): the kernel throttles the container, it
+  does not get more CPU because the host has idle cores. Idle, the JVM
+  uses almost nothing (0.17%). The chat server stays at 0.15% even with 20
+  clients, because broadcasting short lines is cheap.
+- **Memory.** The Bookstore grows from 220 to 276 MiB under load (heap,
+  Tomcat threads) and stays there afterwards: the JVM does not give memory
+  back to the system right away. Without `--memory`, the limit shown is the
+  whole host (15.48 GiB, `chat-v3`), so the JVM sizes its maximum heap from
+  the host and not from the container. With `--memory 512m` it uses 25% of
+  512 MiB as its default maximum heap, which is why Part 2 sets
+  `-XX:MaxRAMPercentage`.
+- **Network.** `NET I/O` is received / sent on the container's interface.
+  The chat server sends 8 times more than it receives (790 kB against
+  100 kB): each message received is sent to every connected client.
+- **Disk.** `BLOCK I/O` hardly moves: the Bookstore uses an in-memory H2
+  database in Part 1 and only the logs are written. Part 2 moves the data
+  to a volume.
+- **PIDs.** The column counts threads, not processes. It grows with the
+  load: Tomcat adds worker threads (30 to 65) and the chat server one thread
+  per client (20 to 51). `docker top` shows the same, 49 threads (`NLWP`)
+  in a single process.
+
+### 4.7. Running as a non-root user
+
+> Modify at least one Dockerfile to avoid running the application as the
+> default root user by creating and using a dedicated unprivileged user
+> through the USER instruction. Justify why running containers as non-root
+> improves security, particularly regarding least privilege, host risk
+> reduction, and container hardening
+
+Without a `USER` instruction the process runs as `root`, the default of the
+base image. Before the change, in `chat-v3`:
+
+```console
+$ docker exec chat-v3 id
+uid=0(root) gid=0(root) groups=0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
+$ docker exec chat-v3 sh -c 'touch /opt/chat/chat-server.jar && echo "can modify the application"; head -c 40 /etc/shadow'
+can modify the application
+root:*::0:::::
+bin:!::0:::::
+daemon:!::0
+$ ps -o user,pid,args -C java       # on the host
+root     2891067 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+```
+
+Both version 3 Dockerfiles now create a system user and switch to it in the
+runtime stage ([chat](part1/chat/v3/Dockerfile),
+[Bookstore](part1/bookstore/v3/Dockerfile)):
+
+```dockerfile
+FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+
+RUN addgroup -S -g 10001 chat \
+ && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
+
+COPY --from=build /out/ /opt/chat/
+
+USER 10001:10001
+```
+
+- `-S` creates a system account, `-D` without a password, `-H` without a
+  home directory and `-s /sbin/nologin` without a login shell.
+- The UID is fixed (10001, outside the range of the base image's users) and
+  `USER` uses the number rather than the name: a platform can then check that
+  the image is not root without reading `/etc/passwd` (Kubernetes
+  `runAsNonRoot` requires a numeric UID).
+- The application files are copied **before** `USER` and keep the owner
+  `root` and mode 0644: the process reads its code but cannot change it.
+- The only directory the Bookstore writes to is `/tmp` (Tomcat's work
+  directory), which every user can write to.
+
+After the change:
+
+```console
+$ docker exec chat-v3 id
+uid=10001(chat) gid=10001(chat) groups=10001(chat)
+$ docker exec chat-v3 sh -c 'touch /opt/chat/chat-server.jar'
+touch: cannot touch '/opt/chat/chat-server.jar': Permission denied
+$ docker exec chat-v3 sh -c 'head -c 40 /etc/shadow'
+head: cannot open '/etc/shadow' for reading: Permission denied
+$ docker exec chat-v3 ls -ln /opt/chat
+-rw-r--r-- 1 0 0 9595 Nov  5 10:35 chat-server.jar
+drwxr-xr-x 2 0 0 4096 Nov  5 10:35 lib
+$ docker exec bookstore-v3 id
+uid=10001(bookstore) gid=10001(bookstore) groups=10001(bookstore)
+$ ps -o user,pid,args -C java       # on the host
+10001    2946805 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+10001    2946912 java -jar /opt/bookstore/bookstore.jar
+$ docker image inspect cogsi-chat:v3 cogsi-bookstore:v3 --format '{{.Config.User}}'
+10001:10001
+10001:10001
+```
+
+Both applications still work: the chat protocol answers from the host and
+`/actuator/health` is `UP` (section 4.6 was measured with these images).
+
+Why it matters:
+
+- **Least privilege.** The chat server needs to read its JAR and open a
+  socket on port 59001, above 1024. Root gives it much more: writing to any
+  file of the image (it could replace its own code, as shown above), reading
+  `/etc/shadow`, installing packages with `apk`. As UID 10001, a bug that
+  lets an attacker run commands only gets what the application needs.
+- **Host risk reduction.** Docker does not remap users by default (no user
+  namespace): `root` in the container is UID 0 on the host, as the first
+  `ps` shows. The kernel is shared, so an escape through a kernel or runtime
+  vulnerability, a mounted host directory or a mounted Docker socket would
+  act as root on the host. As 10001, files created on a bind mount belong to
+  an unprivileged UID, and an escape lands as a user without privileges.
+- **Container hardening.** Non-root is one of several layers: Docker also
+  drops most Linux capabilities and applies a seccomp profile by default.
+  The image can go further at run time with `--read-only` (read-only root
+  filesystem with a `tmpfs` on `/tmp`), `--cap-drop ALL` and
+  `--security-opt no-new-privileges`. These options are cheap once the
+  process no longer needs root.
+
+Versions 1 and 2 were left as root on purpose, as the baseline of the
+comparison: running as non-root does not depend on the build strategy and
+would be the same three lines in any of them.
