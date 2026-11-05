@@ -272,11 +272,17 @@ RUN --mount=type=cache,target=/root/.gradle \
  && cp -r app/build/libs/lib /out/lib
 
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+RUN addgroup -S -g 10001 chat \
+ && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
 COPY --from=build /out/ /opt/chat/
+USER 10001:10001
 EXPOSE 59001
 ENTRYPOINT ["java", "-cp", "/opt/chat/chat-server.jar:/opt/chat/lib/*", "org.example.ChatServerApp"]
 CMD ["59001"]
 ```
+
+(The `addgroup`/`adduser` and `USER` lines were added in section 4.7; the
+first version of this Dockerfile ran as root.)
 
 - **Two stages.** `build` has the JDK, the Gradle Wrapper and the sources;
   `runtime` starts again from the JRE and receives only `/out` (the JAR and
@@ -430,14 +436,19 @@ RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination 
  && ls
 
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+RUN addgroup -S -g 10001 bookstore \
+ && adduser -S -D -H -u 10001 -G bookstore -s /sbin/nologin bookstore
 WORKDIR /opt/bookstore
 COPY --from=build /extracted/dependencies/ ./
 COPY --from=build /extracted/spring-boot-loader/ ./
 COPY --from=build /extracted/snapshot-dependencies/ ./
 COPY --from=build /extracted/application/ ./
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
 ```
+
+(As for the chat server, the user lines come from section 4.7.)
 
 ```console
 #17 [build 9/9] RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination .  && ls
@@ -460,9 +471,10 @@ image.
 a code change replaces, is 32.8 kB:
 
 ```console
-$ docker history cogsi-bookstore:v3 --format '{{.Size}}\t{{.CreatedBy}}' | head -6
+$ docker history cogsi-bookstore:v3 --format '{{.Size}}\t{{.CreatedBy}}' | head -7
 0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
 0B      EXPOSE [8080/tcp]
+0B      USER 10001:10001
 32.8kB  COPY /extracted/application/ ./ # buildkit
 4.1kB   COPY /extracted/snapshot-dependencies/ ./ # buildkit
 4.1kB   COPY /extracted/spring-boot-loader/ ./ # buildkit
