@@ -80,7 +80,8 @@ CA4/
     │   ├── v1/
     │   ├── v2/
     │   └── v3/
-    └── measure.sh            builds, inspects and scans the six images (section 4.4)
+    ├── measure.sh            builds, inspects and scans the six images (section 4.4)
+    └── publish.sh            tags and pushes the six images to a registry (section 4.8)
 ```
 
 The applications are not copied into `CA4/`: versions 2 and 3 use `CA1/part1`
