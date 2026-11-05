@@ -74,17 +74,22 @@ Ansible. CA4 packages the same applications in containers:
 CA4/
 ├── README.md                 this report
 ├── assets/                   screenshots used in the report
-└── part1/
-    ├── chat/                 chat server images (section 4.2)
-    │   ├── v1/               Dockerfile + Dockerfile.dockerignore
-    │   ├── v2/
-    │   └── v3/
-    ├── bookstore/            Bookstore images (section 4.3)
-    │   ├── v1/
-    │   ├── v2/
-    │   └── v3/
-    ├── measure.sh            builds, inspects and scans the six images (section 4.4)
-    └── publish.sh            tags and pushes the six images to a registry (section 4.8)
+├── part1/
+│   ├── chat/                 chat server images (section 4.2)
+│   │   ├── v1/               Dockerfile + Dockerfile.dockerignore
+│   │   ├── v2/
+│   │   └── v3/
+│   ├── bookstore/            Bookstore images (section 4.3)
+│   │   ├── v1/
+│   │   ├── v2/
+│   │   └── v3/
+│   ├── measure.sh            builds, inspects and scans the six images (section 4.4)
+│   └── publish.sh            tags and pushes the six images to a registry (section 4.8)
+└── part2/                    Docker Compose environment (section 5)
+    ├── compose.yaml          services db, web and proxy, networks and volume
+    ├── .env.example          template of the environment (.env is not versioned)
+    ├── db/                   H2 server image: Dockerfile, entrypoint, health check
+    └── proxy/                Nginx image: Dockerfile and configuration template
 ```
 
 The applications are not copied into `CA4/`: versions 2 and 3 use `CA1/part1`
@@ -1217,7 +1222,260 @@ gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
 
 ## 5. Part 2 - proxy, web and db with Docker Compose
 
-_Second week of the assignment (tag `ca4-part2`)._
+> The goal of Part 2 is to use Docker to create a containerized environment
+> for running the Gradle version of the Bookstore Spring Boot application.
+> You will implement a solution similar to Part 2 of CA2, but this time using
+> Docker instead of Vagrant. Use Docker Compose to create three containers:
+> proxy: reverse proxy / frontend entry point; web: hosts the Spring Boot
+> application; db: runs the H2 database server
+
+### 5.1. Design
+
+```text
+                 host :8080
+                     │
+             ┌───────▼────────┐  frontend (bridge)
+             │ proxy (Nginx)  │──────────────┐
+             └────────────────┘              │
+                                     ┌───────▼────────┐
+                                     │ web (Bookstore)│
+                                     └───────┬────────┘
+                       backend (bridge,      │ jdbc:h2:tcp://db:9092
+                       internal: no route    │
+                       outside the host)     │
+                                     ┌───────▼────────┐      ┌──────────┐
+                                     │ db (H2 server) │──────│ h2-data  │
+                                     └────────────────┘      │ (volume) │
+                                                             └──────────┘
+```
+
+| CA2 Part 2 (Vagrant) | CA4 Part 2 (Compose) |
+| --- | --- |
+| three VMs on a private network, fixed IPs (`192.168.56.20-22`) | three containers on two user-defined networks, found by name |
+| `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network; `proxy` is not on it |
+| `wait-for-port` before starting the Bookstore | `depends_on: condition: service_healthy` |
+| H2 data in a synced folder | H2 data in the named volume `h2-data` |
+| `Vagrantfile` variables and provisioning scripts | `.env` and Compose environment variables |
+| shell provisioning on every `vagrant up` | images built once (`docker compose build`), configured at start |
+
+[`part2/compose.yaml`](part2/compose.yaml) describes the three services:
+
+| Service | Image | Built from | Networks | Published |
+| --- | --- | --- | --- | --- |
+| `db` | `rmotafreitas/cogsi-ca4-h2:2.4.240` | [`part2/db/`](part2/db) | `backend` | no |
+| `web` | `rmotafreitas/cogsi-ca4-bookstore:1.0.0` | the version 3 Dockerfile of Part 1, context `CA1/part2` | `backend`, `frontend` | no |
+| `proxy` | `rmotafreitas/cogsi-ca4-proxy:1.0.0` | [`part2/proxy/`](part2/proxy) | `frontend` | `${PROXY_PUBLISHED_PORT}` |
+
+### 5.2. Running the environment
+
+```bash
+cp CA4/part2/.env.example CA4/part2/.env      # then set DB_PASSWORD in it
+docker compose -f CA4/part2/compose.yaml up -d --build --wait
+docker compose -f CA4/part2/compose.yaml ps
+```
+
+Compose is run from the repository root. The `web` image is built with the
+Dockerfile of Part 1, outside `CA4/part2`, and Compose 5 builds through
+Buildx bake, which refuses to read files outside the current directory
+unless allowed:
+
+```console
+$ cd CA4/part2 && docker compose build web
+additional privileges requested: pass "--allow=fs.read=../part1/bookstore/v3/Dockerfile" to grant requested privileges
+```
+
+`docker compose` has no option to pass that permission. Run from the
+root, the file is under the current directory and the build works. The
+project directory is still `CA4/part2` (the directory of the Compose file),
+so `.env` is read from there. Reusing the Part 1 Dockerfile keeps one
+definition of the Bookstore image instead of a copy.
+
+```console
+NAME                IMAGE                                    SERVICE   STATUS                   PORTS
+cogsi-ca4-db-1      rmotafreitas/cogsi-ca4-h2:2.4.240        db        Up 11 seconds (healthy)  9092/tcp
+cogsi-ca4-proxy-1   rmotafreitas/cogsi-ca4-proxy:1.0.0       proxy     Up 2 seconds (healthy)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp
+cogsi-ca4-web-1     rmotafreitas/cogsi-ca4-bookstore:1.0.0   web       Up 9 seconds (healthy)   8080/tcp
+```
+
+`--wait` returns only when every service is healthy. Only `proxy` publishes
+a port; `9092/tcp` and `8080/tcp` are ports exposed on the container
+networks, not on the host.
+
+### 5.3. db - H2 in server mode
+
+[`part2/db/Dockerfile`](part2/db/Dockerfile):
+
+```dockerfile
+FROM eclipse-temurin:21.0.13_9-jre-alpine
+
+RUN addgroup -S -g 10001 h2 \
+ && adduser -S -D -H -u 10001 -G h2 -h /var/lib/h2 -s /sbin/nologin h2 \
+ && install -d -m 0750 -o h2 -g h2 /var/lib/h2 \
+ && install -d -m 0755 /opt/h2
+
+ARG H2_VERSION=2.4.240
+ARG H2_SHA256=29b70e427cc1c40cdc376283adbb0cc62853073797bb5fe5761f81fe73d57ce0
+ADD --chmod=0644 --checksum=sha256:${H2_SHA256} \
+    https://repo1.maven.org/maven2/com/h2database/h2/${H2_VERSION}/h2-${H2_VERSION}.jar /opt/h2/h2.jar
+
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/h2-entrypoint
+COPY --chmod=0755 healthcheck.sh /usr/local/bin/h2-healthcheck
+
+ENV DB_NAME=bookstore H2_PORT=9092 H2_DATA_DIR=/var/lib/h2
+USER 10001:10001
+WORKDIR /var/lib/h2
+EXPOSE 9092
+ENTRYPOINT ["/usr/local/bin/h2-entrypoint"]
+```
+
+- **Same H2 as the driver.** 2.4.240 is the version of the H2 JDBC driver
+  that Spring Boot 4.1.1 puts in the Bookstore. Client and server of the same
+  release avoid protocol and file-format mismatches.
+- **Verified download.** `ADD --checksum` makes BuildKit reject the JAR if
+  its SHA-256 differs. The value was computed from the JAR whose SHA-1
+  matches the one Maven Central publishes (`686180ad...`), the check used in
+  CA2.
+- **`/opt/h2` is created first.** The first version let `ADD --chmod=0644`
+  create the directory. The container then stopped with
+  `Error: Could not find or load main class org.h2.tools.Shell`: `--chmod`
+  had also been applied to the directory (`drw-r--r--`), and without the
+  execute bit the user `h2` could not enter it.
+- **Unprivileged and owner of its data.** The server runs as UID 10001 and
+  `/var/lib/h2` belongs to that user with mode 0750. When an empty named
+  volume is mounted there for the first time, Docker copies the directory
+  of the image into it, owner and mode included, so the volume is writable
+  by the server and nobody else.
+
+[`part2/db/entrypoint.sh`](part2/db/entrypoint.sh) creates the database on
+the first start and then replaces itself with the server (`exec`, so the JVM
+is PID 1 and receives `SIGTERM`):
+
+```sh
+if [ -f "$H2_DATA_DIR/$DB_NAME.mv.db" ]; then
+    echo "[OK] Database $DB_NAME found in $H2_DATA_DIR (kept from the volume)."
+else
+    echo "[INIT] Creating database $DB_NAME in $H2_DATA_DIR, owned by $DB_USER."
+    java -cp "$H2_JAR" org.h2.tools.Shell \
+        -url "jdbc:h2:$H2_DATA_DIR/$DB_NAME" -user "$DB_USER" -password "$DB_PASSWORD" \
+        -sql "SELECT 1" >/dev/null
+fi
+exec java ${JAVA_OPTS:-} -cp "$H2_JAR" org.h2.tools.Server \
+    -tcp -tcpAllowOthers -tcpPort "$H2_PORT" -baseDir "$H2_DATA_DIR"
+```
+
+CA2 started H2 with `-ifNotExists`, which lets any client that reaches the
+port create a database with credentials of its choice. Here the database is
+created locally, once, and the user of that first connection
+(`DB_USER`) becomes its administrator. The server then runs without
+`-ifNotExists`:
+
+```console
+$ java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://db:9092/./other -user x -password y -sql "SELECT 1"
+org.h2.jdbc.JdbcSQLNonTransientConnectionException: Database "/var/lib/h2/other" not found, either pre-create it or allow remote database creation (not recommended in secure environments) [90149-240]
+$ java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://db:9092/./bookstore -user bookstore -password wrong -sql "SELECT 1"
+org.h2.jdbc.JdbcSQLInvalidAuthorizationSpecException: Wrong user name or password [28000-240]
+```
+
+> The credentials are applied when the database is created. Changing
+> `DB_PASSWORD` in `.env` afterwards does not change the password stored in
+> the database: either change it with SQL (`ALTER USER ... SET PASSWORD`) or
+> start from an empty volume (`docker compose down -v`).
+
+#### Health check
+
+> Configure a health check on the db container, so that the web service only
+> starts after the database is available
+
+[`part2/db/healthcheck.sh`](part2/db/healthcheck.sh) runs `SELECT 1` over TCP
+with the application's credentials:
+
+```sh
+exec java -XX:TieredStopAtLevel=1 -cp /opt/h2/h2.jar org.h2.tools.Shell \
+    -url "jdbc:h2:tcp://localhost:${H2_PORT}/./${DB_NAME}" \
+    -user "$DB_USER" -password "$DB_PASSWORD" \
+    -sql "SELECT 1" >/dev/null
+```
+
+```yaml
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/h2-healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+```
+
+- A TCP check (`nc -z db 9092`) only proves that the JVM listens. The query
+  also proves that the database file opens and that the credentials of
+  `web` are accepted, which is exactly what `web` needs.
+- A Java exception ends the JVM with exit code 1, so a failed query is an
+  unhealthy result; `-XX:TieredStopAtLevel=1` shortens the start of this
+  short-lived JVM.
+- `start_interval: 2s` probes every 2 seconds during the start period, so
+  `db` is reported healthy about 2 seconds after it starts instead of after
+  the first 15-second interval. After the start period, a probe every 15
+  seconds, and 3 consecutive failures mark it unhealthy.
+
+### 5.4. Persisting the database in a volume
+
+> Use a Docker volume in the db container to persist the database file.
+> Ensuring that data is stored outside the container's filesystem and can be
+> retained and reused across container restarts
+
+```yaml
+services:
+  db:
+    volumes:
+      - h2-data:/var/lib/h2
+volumes:
+  h2-data: {}
+```
+
+`h2-data` is a named volume managed by Docker
+(`/var/lib/docker/volumes/cogsi-ca4_h2-data/_data` on the host), not a bind
+mount: it does not depend on a path of the host, it is created with the
+owner of `/var/lib/h2` in the image, and `docker compose down` keeps it
+(only `down -v` deletes it).
+
+```bash
+C() { docker compose -f CA4/part2/compose.yaml "$@"; }
+C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
+  -user bookstore -password "$DB_PASSWORD" \
+  -sql "CREATE TABLE IF NOT EXISTS probe(id INT, note VARCHAR(40)); INSERT INTO probe VALUES (1, 'written before down')"
+C down          # removes the containers and the networks
+docker volume ls --filter name=cogsi-ca4
+C up -d --wait
+C logs db | tail -3
+C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
+  -user bookstore -password "$DB_PASSWORD" -sql "SELECT * FROM probe"
+```
+
+```console
+DRIVER    VOLUME NAME
+local     cogsi-ca4_h2-data
+db-1  | [OK] Database bookstore found in /var/lib/h2 (kept from the volume).
+db-1  | [START] H2 TCP server on port 9092, base directory /var/lib/h2.
+db-1  | TCP server running at tcp://172.24.0.2:9092 (others can connect)
+ID | NOTE
+1  | written before down
+(1 row, 5 ms)
+```
+
+The containers were deleted and created again; the row and the database
+survived in the volume, and the entrypoint found the database instead of
+creating a new one. The same holds for data written through the API: the
+book created in section 5.5 is still returned after every restart in the
+following sections.
+
+```console
+$ docker exec cogsi-ca4-db-1 ls -ln /var/lib/h2
+-rw-r--r-- 1 10001 10001 20480 Nov  5 10:41 bookstore.mv.db
+```
+
+> As in CA2 and CA3, the Bookstore inserts its sample data on every start,
+> so the two sample books appear again after each restart with new ids. This
+> is the behaviour of the application's `DataInitializer`, not data loss.
 
 ---
 
