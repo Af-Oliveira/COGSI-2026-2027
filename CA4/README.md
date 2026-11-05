@@ -1587,6 +1587,222 @@ only reports `unhealthy`: a restart policy reacts to the process exiting,
 not to the health status, so an unhealthy container is not restarted.
 `depends_on` acts only when the environment starts.
 
+### 5.6. proxy - Nginx
+
+> proxy: reverse proxy / frontend entry point [...] Configure a health check
+> on the web container, so that the proxy service only starts after the
+> application is available
+
+[`part2/proxy/Dockerfile`](part2/proxy/Dockerfile) adds a template to the
+official image:
+
+```dockerfile
+FROM nginx:1.31.8-alpine
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
+    NGINX_PORT=80 \
+    UPSTREAM_HOST=web \
+    UPSTREAM_PORT=8080 \
+    PROXY_READ_TIMEOUT=60s
+COPY templates/default.conf.template /etc/nginx/templates/default.conf.template
+```
+
+[`default.conf.template`](part2/proxy/templates/default.conf.template):
+
+```nginx
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+
+server {
+    listen ${NGINX_PORT} default_server;
+    server_name _;
+
+    location = /nginx-health {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        set $upstream http://${UPSTREAM_HOST}:${UPSTREAM_PORT};
+        proxy_pass $upstream;
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    ${PROXY_READ_TIMEOUT};
+    }
+}
+```
+
+- **Template rendered at start.** The entrypoint of the official image runs
+  `envsubst` on `/etc/nginx/templates/*.template` and writes the result to
+  `/etc/nginx/conf.d/`. Only variables that are defined in the environment
+  are replaced, so Nginx's own variables (`$http_host`, `$remote_addr`) are
+  left alone. One image serves any port or upstream.
+- **Name resolved at request time.** With a literal `proxy_pass http://web:8080`,
+  Nginx resolves `web` once, at start, and keeps that address. With a
+  variable it asks the `resolver` at request time (cached 10 s), so it
+  follows `web` if the container is recreated with another address. Tested
+  by forcing `web` to a new address: removed, its old address taken by
+  another container, then created again (`172.25.0.2` -> `172.25.0.4`). The
+  proxy kept answering 200 without being restarted.
+- **The resolver comes from `/etc/resolv.conf`.**
+  `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` makes the entrypoint export the name
+  servers of the container as `NGINX_LOCAL_RESOLVERS`. The first version
+  had Docker's embedded DNS address, `127.0.0.11`, written in the template,
+  and returned `502 Bad Gateway` under Podman, whose DNS server is the
+  network gateway (section 7). The rendered configuration under Docker:
+
+  ```console
+  $ C exec -T proxy grep -E 'resolver|listen|upstream' /etc/nginx/conf.d/default.conf
+  resolver 127.0.0.11 valid=10s ipv6=off;
+      listen 80 default_server;
+          set $upstream http://web:8080;
+  ```
+
+- **`Host $http_host`** passes the host and port the client used
+  (`localhost:8080`), so the HATEOAS links point to the proxy, as in CA2.
+- **`/nginx-health`** answers locally, without going to `web`, and is the
+  proxy's health check.
+
+```yaml
+  proxy:
+    image: ${IMAGE_NAMESPACE:-rmotafreitas}/cogsi-ca4-proxy:${PROXY_VERSION:-1.0.0}
+    build:
+      context: ./proxy
+    environment:
+      NGINX_PORT: ${PROXY_LISTEN_PORT:-80}
+      UPSTREAM_HOST: ${PROXY_UPSTREAM_HOST:-web}
+      UPSTREAM_PORT: ${WEB_PORT:-8080}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-60s}
+    ports:
+      - "${PROXY_PUBLISHED_PORT:-8080}:${PROXY_LISTEN_PORT:-80}"
+    depends_on:
+      web:
+        condition: service_healthy
+    networks: [frontend]
+```
+
+```console
+$ curl -s -i localhost:8080/books/3 | grep -E '^HTTP|^Server|^Content-Type'
+HTTP/1.1 200
+Server: nginx/1.31.8
+Content-Type: application/hal+json
+$ curl -s localhost:8080/books/3
+{"_links":{"self":{"href":"http://localhost:8080/books/3"},"books":{"href":"http://localhost:8080/books"}},"author":"COGSI","id":3,"price":12.5,"title":"Persisted in H2"}
+$ docker port cogsi-ca4-web-1 | wc -l
+0
+```
+
+### 5.7. Name resolution and isolation
+
+> Verify network connectivity between the services. Ensure containers can
+> resolve each other's hostnames
+
+On a user-defined network, Docker runs an embedded DNS server
+(`127.0.0.11` in each container) that resolves the name of each service
+(and of each container) to its address **on that network**. The default
+`bridge` network has no such server, which is why Compose creates its own.
+
+```bash
+C exec -T web getent hosts db        # web is on backend and frontend
+C exec -T web getent hosts proxy
+C exec -T proxy getent hosts web
+C exec -T proxy getent hosts db      # proxy is only on frontend
+C exec -T db getent hosts web
+C exec -T proxy sh -c 'nc -z -w2 web 8080 && echo "proxy -> web:8080 open"'
+C exec -T web sh -c 'nc -z -w2 db 9092 && echo "web -> db:9092 open"'
+C exec -T db sh -c 'wget -q -T 3 -O /dev/null https://repo1.maven.org || echo "db -> internet: blocked"'
+for n in frontend backend; do docker network inspect cogsi-ca4_$n \
+  --format '{{.Name}} internal={{.Internal}} {{range .Containers}}{{.Name}}={{.IPv4Address}} {{end}}'; done
+```
+
+```console
+172.24.0.2        db  db
+172.25.0.3        proxy  proxy
+172.25.0.2        web  web
+proxy: db not resolvable (exit 2)
+172.24.0.3        web  web
+proxy -> web:8080 open
+web -> db:9092 open
+wget: bad address 'repo1.maven.org'
+db -> internet: blocked
+cogsi-ca4_frontend internal=false cogsi-ca4-proxy-1=172.25.0.3/16 cogsi-ca4-web-1=172.25.0.2/16
+cogsi-ca4_backend internal=true cogsi-ca4-db-1=172.24.0.2/16 cogsi-ca4-web-1=172.24.0.3/16
+```
+
+- `web` has one address on each network, and each peer sees the address on
+  the network they share (`db` sees `web` as `172.24.0.3`, `proxy` as
+  `172.25.0.2`).
+- `proxy` cannot resolve `db` at all: they share no network. This replaces
+  the `ufw` rule of CA2, and it is enforced by the topology rather than by a
+  firewall rule inside a machine.
+- `backend` is `internal: true`: it has no gateway to the outside, so
+  `db` cannot even resolve an external name. The database has no reason to
+  reach the internet, and a compromised `db` cannot use it to exfiltrate
+  data. A side effect is that an internal network cannot publish ports,
+  which is why `web` was attached to `frontend` from the start, before the
+  proxy existed.
+
+### 5.8. Configuration with environment variables
+
+> Use Docker Compose environment variables to configure all services. E.g.:
+> db: database credentials and storage settings; web: Spring application and
+> database connectivity; proxy: externally exposed port and optionally proxy
+> routing settings
+
+Every value that may change between environments is a variable read from
+`CA4/part2/.env` (not versioned, see [`.gitignore`](part2/.gitignore)), with
+[`.env.example`](part2/.env.example) as the template:
+
+| Service | Variable in `.env` | Becomes in the container | Default |
+| --- | --- | --- | --- |
+| all | `IMAGE_NAMESPACE`, `APP_VERSION`, `PROXY_VERSION`, `H2_VERSION` | image names and tags | `rmotafreitas`, `1.0.0`, `1.0.0`, `2.4.240` |
+| db | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `bookstore`, required, required |
+| db | `H2_PORT`, `DB_JAVA_OPTS` | `H2_PORT`, `JAVA_OPTS`; storage `H2_DATA_DIR=/var/lib/h2` | `9092`, `-Xmx256m` |
+| web | `WEB_PORT` | `SERVER_PORT` | `8080` |
+| web | `DB_NAME`, `H2_PORT` | `SPRING_DATASOURCE_URL=jdbc:h2:tcp://db:<port>/./<name>` | |
+| web | `DB_USER`, `DB_PASSWORD` | `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | required |
+| web | `JPA_DDL_AUTO`, `JPA_SHOW_SQL`, `WEB_JAVA_OPTS` | `SPRING_JPA_*`, `JAVA_TOOL_OPTIONS` | `update`, `false`, `-XX:MaxRAMPercentage=75` |
+| proxy | `PROXY_PUBLISHED_PORT`, `PROXY_LISTEN_PORT` | host port, `NGINX_PORT` | `8080`, `80` |
+| proxy | `PROXY_UPSTREAM_HOST`, `WEB_PORT`, `PROXY_READ_TIMEOUT` | `UPSTREAM_HOST`, `UPSTREAM_PORT`, `PROXY_READ_TIMEOUT` | `web`, `8080`, `60s` |
+
+- **One source per value.** `DB_USER` and `DB_PASSWORD` configure both
+  sides, the database and the datasource, so they cannot drift apart.
+  `WEB_PORT` is both the port of the Bookstore and the upstream port of the
+  proxy.
+- **Required values fail early.** `${DB_PASSWORD:?...}` stops Compose before
+  anything is created if the password is missing or empty, and the
+  template leaves it empty on purpose:
+
+  ```console
+  $ cp CA4/part2/.env.example CA4/part2/.env && docker compose -f CA4/part2/compose.yaml config --quiet
+  error while interpolating services.db.environment.DB_PASSWORD: required variable DB_PASSWORD is missing a value: set DB_PASSWORD in .env
+  ```
+
+- **Variables of the shell override `.env`.** The proxy was moved to
+  another host port and another listening port without editing any file:
+
+  ```console
+  $ PROXY_PUBLISHED_PORT=8088 PROXY_LISTEN_PORT=8000 docker compose -f CA4/part2/compose.yaml up -d --wait proxy
+  $ docker compose -f CA4/part2/compose.yaml ps proxy --format '{{.Ports}}'
+  80/tcp, 0.0.0.0:8088->8000/tcp, [::]:8088->8000/tcp
+  $ docker compose -f CA4/part2/compose.yaml exec -T proxy grep listen /etc/nginx/conf.d/default.conf
+      listen 8000 default_server;
+  ```
+
+- **`docker compose config`** prints the file with every variable
+  replaced, which is how the result of the interpolation can be checked
+  before starting anything.
+
+> Environment variables are visible to anyone who can run `docker inspect`
+> on the container. The assignment asks for variables, and `.env` is kept
+> out of Git. For production, Compose `secrets:` mount the value as a file
+> (`/run/secrets/...`) instead. The Podman implementation (section 7) uses
+> Podman secrets.
+
 ---
 
 ## 6. Alternative solution - analysis and design
