@@ -72,8 +72,12 @@ CA4/
 ├── README.md                 this report
 ├── assets/                   screenshots used in the report
 └── part1/
-    └── chat/                 chat server images (section 4.2)
-        ├── v1/               Dockerfile + Dockerfile.dockerignore
+    ├── chat/                 chat server images (section 4.2)
+    │   ├── v1/               Dockerfile + Dockerfile.dockerignore
+    │   ├── v2/
+    │   └── v3/
+    └── bookstore/            Bookstore images (section 4.3)
+        ├── v1/
         ├── v2/
         └── v3/
 ```
@@ -336,3 +340,152 @@ The chat server is running...
 The published port (`-p 59003:59001`) is what makes the server reachable:
 Docker forwards connections to port 59003 of the host to port 59001 of the
 container. `EXPOSE` only documents the port in the image metadata.
+
+### 4.3. Bookstore
+
+The Bookstore (`CA1/part2`) is a Spring Boot 4.1 application. The Spring Boot
+Gradle plugin's `bootJar` task produces an executable JAR (`bookstore-1.0.0.jar`)
+with every dependency nested in `BOOT-INF/lib`, so it runs with `java -jar`.
+In Part 1 it keeps the in-memory H2 database of CA1; Part 2 connects it to an
+H2 server.
+
+#### Version 1 - clone and build inside the image
+
+[`part1/bookstore/v1/Dockerfile`](part1/bookstore/v1/Dockerfile) follows the
+chat server's version 1: JDK image, `git` installed, shallow clone of
+`REPO_REF`, then:
+
+```dockerfile
+WORKDIR /src/CA1/part2
+RUN ./gradlew --no-daemon --console=plain bootJar \
+ && mkdir -p /opt/bookstore \
+ && cp build/libs/bookstore-*.jar /opt/bookstore/bookstore.jar
+
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
+```
+
+`bootJar` builds only the executable JAR. `build` would also run the unit and
+integration tests and produce the plain JAR, the Javadoc and the
+distributions, none of which the container needs.
+
+```bash
+docker build -t cogsi-bookstore:v1 CA4/part1/bookstore/v1
+```
+
+#### Version 2 - JAR built on the host
+
+```bash
+(cd CA1/part2 && ./gradlew bootJar)
+docker build -f CA4/part1/bookstore/v2/Dockerfile -t cogsi-bookstore:v2 CA1/part2
+```
+
+```dockerfile
+FROM eclipse-temurin:21.0.13_9-jre-alpine
+COPY build/libs/bookstore-*.jar /opt/bookstore/bookstore.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
+```
+
+`build/libs` on the host also holds `bookstore-1.0.0-plain.jar`, made by the
+`jar` task during a full `build`. It matches `bookstore-*.jar` too, and a
+`COPY` of two files to one destination file fails. The ignore file therefore
+re-includes the executable JAR and excludes the plain one again:
+
+```text
+*
+!build/libs/bookstore-*.jar
+build/libs/*-plain.jar
+```
+
+#### Version 3 - multi-stage build with the Spring Boot layers
+
+```bash
+docker build -f CA4/part1/bookstore/v3/Dockerfile -t cogsi-bookstore:v3 CA1/part2
+```
+
+The build stage is the same as the chat server's (build scripts, dependency
+resolution, then sources, with a Gradle cache mount), with one more step. An
+executable JAR is a single file, so in version 2 the 56 MB of dependencies and
+the 33 KB of application classes are one layer, sent again to the registry
+and to every host after each code change. Spring Boot can split the JAR into
+layers, ordered from the one that changes least to the one that changes most:
+
+```dockerfile
+WORKDIR /extracted
+RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination . \
+ && ls
+
+FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+WORKDIR /opt/bookstore
+COPY --from=build /extracted/dependencies/ ./
+COPY --from=build /extracted/spring-boot-loader/ ./
+COPY --from=build /extracted/snapshot-dependencies/ ./
+COPY --from=build /extracted/application/ ./
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
+```
+
+```console
+#17 [build 9/9] RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination .  && ls
+#17 0.739 application
+#17 0.739 dependencies
+#17 0.739 snapshot-dependencies
+#17 0.739 spring-boot-loader
+```
+
+`extract` writes the 80 libraries to `lib/` and a thin `bookstore.jar` whose
+manifest lists them in its `Class-Path`, so `java -jar` still works and there
+is no unpacking of nested JARs at start-up. The ignore file excludes the build
+output and caches of the host, as in the chat server, and also
+`src/test/` and `src/integrationTest/`: the tests do not run in the image, so
+editing a test does not rebuild it.
+
+`docker history` shows the four layers. The application layer, the only one
+a code change replaces, is 32.8 kB:
+
+```console
+$ docker history cogsi-bookstore:v3 --format '{{.Size}}\t{{.CreatedBy}}' | head -6
+0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
+0B      EXPOSE [8080/tcp]
+32.8kB  COPY /extracted/application/ ./ # buildkit
+4.1kB   COPY /extracted/snapshot-dependencies/ ./ # buildkit
+4.1kB   COPY /extracted/spring-boot-loader/ ./ # buildkit
+55.7MB  COPY /extracted/dependencies/ ./ # buildkit
+```
+
+> The first attempt used `ENTRYPOINT ["java", "-jar", "application.jar"]`, as
+> in older Spring Boot examples, and the container stopped with
+> `Error: Unable to access jarfile /opt/bookstore/application.jar`. In Spring
+> Boot 4 the extracted JAR keeps the name of the source JAR, `bookstore.jar`.
+
+#### Running the three versions and using the API from the host
+
+Port 8081 is used by another service on this host, so the containers use
+18081 to 18083:
+
+```bash
+docker run -d --name bookstore-v1 -p 18081:8080 cogsi-bookstore:v1
+docker run -d --name bookstore-v2 -p 18082:8080 cogsi-bookstore:v2
+docker run -d --name bookstore-v3 -p 18083:8080 cogsi-bookstore:v3
+for port in 18081 18082 18083; do curl -s localhost:$port/actuator/health; echo; curl -s localhost:$port/books; echo; done
+```
+
+```console
+{"groups":["liveness","readiness"],"status":"UP"}
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"}]
+```
+
+(the same two lines for each port). Writing through the API of version 3:
+
+```console
+$ curl -s -X POST localhost:18083/books -H 'Content-Type: application/json' \
+    -d '{"title":"Docker Deep Dive","author":"Nigel Poulton","price":35.0}'
+{"author":"Nigel Poulton","id":3,"price":35.0,"title":"Docker Deep Dive"}
+$ curl -s localhost:18083/books/3
+{"_links":{"self":{"href":"http://localhost:18083/books/3"},"books":{"href":"http://localhost:18083/books"}},"author":"Nigel Poulton","id":3,"price":35.0,"title":"Docker Deep Dive"}
+```
+
+The `self` link uses the host and port of the request (`localhost:18083`), not
+the address of the container, because Spring HATEOAS builds it from the
+`Host` header.
