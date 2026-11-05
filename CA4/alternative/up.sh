@@ -28,6 +28,9 @@ set -a
 # shellcheck source=SCRIPTDIR/podman.env.example
 . "$ALT/podman.env"
 set +a
+# Defaults for settings added after a podman.env may have been created.
+: "${DB_MEM_LIMIT:=512m}" "${DB_CPUS:=1}" "${WEB_MEM_LIMIT:=768m}" "${WEB_CPUS:=1.5}"
+: "${PROXY_MEM_LIMIT:=128m}" "${PROXY_CPUS:=0.5}"
 
 echo "[BUILD] images"
 podman build -q -t localhost/cogsi-ca4-h2:2.4.240 CA4/part2/db
