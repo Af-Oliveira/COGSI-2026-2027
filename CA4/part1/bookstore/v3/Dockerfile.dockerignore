@@ -1,0 +1,14 @@
+# The build stage compiles from the sources, so the host's build output and
+# Gradle caches are excluded (large, they would invalidate the COPY cache and
+# could leak host-compiled classes into the image). The tests are not run in
+# the image, so their sources are excluded too: a change to a test does not
+# rebuild the image.
+.gradle/
+build/
+.kotlin/
+src/test/
+src/integrationTest/
+.idea/
+.vscode/
+*.iml
+*.log
