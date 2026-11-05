@@ -34,6 +34,7 @@ RUN --mount=type=cache,target=/root/.gradle \
 # Spring Boot's jarmode "tools" writes one directory per layer, each with the
 # files of that layer; the thin bookstore.jar (application layer) references
 # the libraries in lib/ through the Class-Path of its manifest.
+# "ls" only prints the extracted layer directories in the build log.
 WORKDIR /extracted
 RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination . \
  && ls
