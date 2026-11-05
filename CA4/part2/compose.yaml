@@ -7,7 +7,8 @@
 #
 # Start order: db healthy -> web healthy -> proxy.
 #
-# Every setting comes from the environment; copy .env.example to .env first.
+# Every setting that may change between environments comes from the
+# environment; copy .env.example to .env first.
 # Run from the repository root: the web image is built from the Part 1
 # Dockerfile, and Buildx only reads files outside the context that are under
 # the current directory. Compose still reads CA4/part2/.env.
@@ -38,6 +39,11 @@ services:
       - h2-data:/var/lib/h2
     networks:
       - backend
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEM_LIMIT:-512m}
+          cpus: "${DB_CPUS:-1}"
     healthcheck:
       test: ["CMD", "/usr/local/bin/h2-healthcheck"]
       interval: 15s
@@ -71,6 +77,12 @@ services:
     networks:
       - backend
       - frontend
+    deploy:
+      resources:
+        limits:
+          # The JVM sizes its heap from this limit (WEB_JAVA_OPTS).
+          memory: ${WEB_MEM_LIMIT:-768m}
+          cpus: "${WEB_CPUS:-1.5}"
     healthcheck:
       # The actuator health includes the datasource: UP only if H2 answers.
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${SERVER_PORT}/actuator/health | grep -q '\"status\":\"UP\"'"]
@@ -97,6 +109,11 @@ services:
         condition: service_healthy
     networks:
       - frontend
+    deploy:
+      resources:
+        limits:
+          memory: ${PROXY_MEM_LIMIT:-128m}
+          cpus: "${PROXY_CPUS:-0.5}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${NGINX_PORT}/nginx-health"]
       interval: 15s
@@ -108,8 +125,8 @@ services:
 
 networks:
   frontend: {}
-  # No route outside the host: db is reachable only from the services
-  # attached to this network.
+  # No route outside the host. Other containers reach db only if they are
+  # attached to this network (the host itself can still reach the bridge).
   backend:
     internal: true
 
