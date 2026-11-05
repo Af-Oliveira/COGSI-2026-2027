@@ -30,5 +30,7 @@ fi
 
 echo "[START] H2 TCP server on port $H2_PORT, base directory $H2_DATA_DIR."
 # exec: java replaces the shell as PID 1 and receives SIGTERM on docker stop.
+# JAVA_OPTS is unquoted on purpose: it may hold several JVM options.
+# shellcheck disable=SC2086
 exec java ${JAVA_OPTS:-} -cp "$H2_JAR" org.h2.tools.Server \
     -tcp -tcpAllowOthers -tcpPort "$H2_PORT" -baseDir "$H2_DATA_DIR"

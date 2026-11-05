@@ -54,7 +54,7 @@ Ansible. CA4 packages the same applications in containers:
 | Host | Debian GNU/Linux 13 (trixie), kernel 6.12, x86-64 | 12 CPUs, 16 GB RAM |
 | Docker Engine | 29.9.2 (API 1.56) | containerd 2.4.2 image store |
 | Docker Buildx | 0.38.1 | BuildKit: cache mounts, Dockerfile-specific ignore files |
-| Docker Compose | 5.6.1 | Part 2 |
+| Docker Compose | 5.6.1 | Part 2; `start_interval` in the health checks needs Docker Engine 25 and Compose 2.20 or later |
 | JDK on the host | OpenJDK 21.0.4 | only for version 2 of each image and for the chat client |
 | Base images | `eclipse-temurin:21.0.13_9-jdk`, `eclipse-temurin:21.0.13_9-jre-alpine` | pinned to a JDK release, see [section 4.1](#41-build-strategies-and-base-images) |
 
@@ -272,11 +272,17 @@ RUN --mount=type=cache,target=/root/.gradle \
  && cp -r app/build/libs/lib /out/lib
 
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+RUN addgroup -S -g 10001 chat \
+ && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
 COPY --from=build /out/ /opt/chat/
+USER 10001:10001
 EXPOSE 59001
 ENTRYPOINT ["java", "-cp", "/opt/chat/chat-server.jar:/opt/chat/lib/*", "org.example.ChatServerApp"]
 CMD ["59001"]
 ```
+
+(The `addgroup`/`adduser` and `USER` lines were added in section 4.7; the
+first version of this Dockerfile ran as root.)
 
 - **Two stages.** `build` has the JDK, the Gradle Wrapper and the sources;
   `runtime` starts again from the JRE and receives only `/out` (the JAR and
@@ -430,14 +436,19 @@ RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination 
  && ls
 
 FROM eclipse-temurin:21.0.13_9-jre-alpine AS runtime
+RUN addgroup -S -g 10001 bookstore \
+ && adduser -S -D -H -u 10001 -G bookstore -s /sbin/nologin bookstore
 WORKDIR /opt/bookstore
 COPY --from=build /extracted/dependencies/ ./
 COPY --from=build /extracted/spring-boot-loader/ ./
 COPY --from=build /extracted/snapshot-dependencies/ ./
 COPY --from=build /extracted/application/ ./
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
 ```
+
+(As for the chat server, the user lines come from section 4.7.)
 
 ```console
 #17 [build 9/9] RUN java -Djarmode=tools -jar /tmp/bookstore.jar extract --layers --destination .  && ls
@@ -460,9 +471,10 @@ image.
 a code change replaces, is 32.8 kB:
 
 ```console
-$ docker history cogsi-bookstore:v3 --format '{{.Size}}\t{{.CreatedBy}}' | head -6
+$ docker history cogsi-bookstore:v3 --format '{{.Size}}\t{{.CreatedBy}}' | head -7
 0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
 0B      EXPOSE [8080/tcp]
+0B      USER 10001:10001
 32.8kB  COPY /extracted/application/ ./ # buildkit
 4.1kB   COPY /extracted/snapshot-dependencies/ ./ # buildkit
 4.1kB   COPY /extracted/spring-boot-loader/ ./ # buildkit
@@ -1252,11 +1264,11 @@ gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
 | CA2 Part 2 (Vagrant) | CA4 Part 2 (Compose) |
 | --- | --- |
 | three VMs on a private network, fixed IPs (`192.168.56.20-22`) | three containers on two user-defined networks, found by name |
-| `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network; `proxy` is not on it |
+| `ufw`: H2 port open only to the app VM | `db` is only on the internal `backend` network, which `proxy` is not on (container-to-container isolation; section 5.7) |
 | `wait-for-port` before starting the Bookstore | `depends_on: condition: service_healthy` |
-| H2 data in a synced folder | H2 data in the named volume `h2-data` |
+| H2 data on the disk of the db VM (`/var/lib/h2`) | H2 data in the named volume `h2-data`, outside the container |
 | `Vagrantfile` variables and provisioning scripts | `.env` and Compose environment variables |
-| shell provisioning on every `vagrant up` | images built once (`docker compose build`), configured at start |
+| shell provisioning on the first `vagrant up` (or `--provision`), configuring each VM in place | images built once (`docker compose build`), configured by variables at every start |
 
 [`part2/compose.yaml`](part2/compose.yaml) describes the three services:
 
@@ -1438,17 +1450,20 @@ mount: it does not depend on a path of the host, it is created with the
 owner of `/var/lib/h2` in the image, and `docker compose down` keeps it
 (only `down -v` deletes it).
 
+The SQL runs inside `db`, with the credentials of its own environment (the
+single quotes leave `$DB_USER` and `$DB_PASSWORD` to the container's shell,
+so the password never has to be typed on the host):
+
 ```bash
 C() { docker compose -f CA4/part2/compose.yaml "$@"; }
-C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
-  -user bookstore -password "$DB_PASSWORD" \
-  -sql "CREATE TABLE IF NOT EXISTS probe(id INT, note VARCHAR(40)); INSERT INTO probe VALUES (1, 'written before down')"
+sql() { C exec -T db sh -c 'java -cp /opt/h2/h2.jar org.h2.tools.Shell \
+  -url "jdbc:h2:tcp://localhost:$H2_PORT/./$DB_NAME" -user "$DB_USER" -password "$DB_PASSWORD" -sql "$1"' sh "$1"; }
+sql "CREATE TABLE IF NOT EXISTS probe(id INT, note VARCHAR(40)); INSERT INTO probe VALUES (1, 'written before down')"
 C down          # removes the containers and the networks
 docker volume ls --filter name=cogsi-ca4
 C up -d --wait
 C logs db | tail -3
-C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
-  -user bookstore -password "$DB_PASSWORD" -sql "SELECT * FROM probe"
+sql "SELECT * FROM probe"
 ```
 
 ```console
@@ -1514,18 +1529,33 @@ $ docker exec cogsi-ca4-db-1 ls -ln /var/lib/h2
   `application.properties` inside the JAR. CA2 wrote an
   `/etc/bookstore/application.properties` file; here the same settings are
   plain variables.
-- **`depends_on: condition: service_healthy`.** Compose creates `web` only
+- **`depends_on: condition: service_healthy`.** Compose starts `web` only
   when the health check of `db` passes. Without the condition, `depends_on`
-  only orders the creation of the containers, and the Bookstore could try
+  only orders the start of the containers, and the Bookstore could try
   to open its connection pool before H2 accepts connections.
 - **Health check.** `/actuator/health` aggregates the health of the
   datasource, so it is `UP` only if the application is up **and** its
   connection to H2 works. `wget` is BusyBox's, already in the Alpine image.
   `$$` stops Compose from interpolating `SERVER_PORT` from `.env`, so
   the shell of the container expands it.
-- **JVM sizing.** `-XX:MaxRAMPercentage=75` gives the heap 75% of the
-  container's memory limit when one is set, instead of the JVM default of
-  25% (section 4.6).
+- **Resource limits and JVM sizing.** Each service has a memory and CPU
+  limit under `deploy.resources.limits` (web 768 MiB and 1.5 CPUs, db
+  512 MiB and 1 CPU, proxy 128 MiB and 0.5 CPU, all variables in `.env`).
+  `-XX:MaxRAMPercentage=75` then gives the Bookstore's heap 75% of its
+  limit instead of the JVM default of 25% (section 4.6). Without a limit
+  the JVM would size it from the whole host (11.6 GiB here).
+
+  ```console
+  $ docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' cogsi-ca4-db-1 cogsi-ca4-web-1 cogsi-ca4-proxy-1
+  NAME                CPU %     MEM USAGE / LIMIT   MEM %
+  cogsi-ca4-db-1      0.28%     41.37MiB / 512MiB   8.08%
+  cogsi-ca4-web-1     0.35%     208.6MiB / 768MiB   27.17%
+  cogsi-ca4-proxy-1   0.00%     10.05MiB / 128MiB   7.85%
+  $ C exec -T web sh -c 'java -XX:MaxRAMPercentage=75 -XX:+PrintFlagsFinal -version | grep " MaxHeapSize "'
+     size_t MaxHeapSize          = 603979776     {product} {ergonomic}
+  ```
+
+  576 MiB is 75% of 768 MiB.
 - **The image is the non-root version 3** of Part 1 (UID 10001).
 
 ```console
@@ -1592,6 +1622,12 @@ not to the health status, so an unhealthy container is not restarted.
 > proxy: reverse proxy / frontend entry point [...] Configure a health check
 > on the web container, so that the proxy service only starts after the
 > application is available
+
+Nginx continues the proxy of CA2 and CA3, so the configuration is the same
+one, and its official image fills a configuration template from environment
+variables at start, which is what the requirement on variables asks for.
+Traefik or Caddy, which discover containers through Docker labels, would add
+a second configuration model for a single fixed upstream.
 
 [`part2/proxy/Dockerfile`](part2/proxy/Dockerfile) adds a template to the
 official image:
@@ -1666,6 +1702,15 @@ server {
   (`localhost:8080`), so the HATEOAS links point to the proxy, as in CA2.
 - **`/nginx-health`** answers locally, without going to `web`, and is the
   proxy's health check.
+- **What the proxy exposes.** Everything under `/` goes to the Bookstore,
+  including `/actuator`. Spring Boot exposes only the `health` endpoint over
+  HTTP by default, without details (`/actuator/env`, for example, answers
+  404), so the health check used by Docker does not reveal configuration.
+- **The Nginx master process runs as root** in the official image, to bind
+  port 80, and its workers, which handle the requests, run as the user
+  `nginx`. The container writes nothing to the host. The
+  `nginxinc/nginx-unprivileged` image would remove root entirely, at the
+  cost of listening on a port above 1024 inside the container.
 
 ```yaml
   proxy:
@@ -1710,7 +1755,7 @@ On a user-defined network, Docker runs an embedded DNS server
 C exec -T web getent hosts db        # web is on backend and frontend
 C exec -T web getent hosts proxy
 C exec -T proxy getent hosts web
-C exec -T proxy getent hosts db      # proxy is only on frontend
+C exec -T proxy getent hosts db || echo "proxy: db not resolvable (exit $?)"   # proxy is only on frontend
 C exec -T db getent hosts web
 C exec -T proxy sh -c 'nc -z -w2 web 8080 && echo "proxy -> web:8080 open"'
 C exec -T web sh -c 'nc -z -w2 db 9092 && echo "web -> db:9092 open"'
@@ -1736,9 +1781,33 @@ cogsi-ca4_backend internal=true cogsi-ca4-db-1=172.24.0.2/16 cogsi-ca4-web-1=172
 - `web` has one address on each network, and each peer sees the address on
   the network they share (`db` sees `web` as `172.24.0.3`, `proxy` as
   `172.25.0.2`).
-- `proxy` cannot resolve `db` at all: they share no network. This replaces
-  the `ufw` rule of CA2, and it is enforced by the topology rather than by a
-  firewall rule inside a machine.
+- `proxy` cannot resolve `db` at all: they share no network. Between
+  containers, this replaces the `ufw` rule of CA2, enforced by the topology
+  rather than by a firewall rule inside a machine. A container on another
+  network cannot reach `db` either.
+- The isolation is between containers, not from the host. On Linux the
+  bridge networks are interfaces of the host, so the host itself can open a
+  connection to any container address (CA2's `ufw` blocked the host too):
+
+  ```console
+  $ DB_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "cogsi-ca4_backend").IPAddress}}' cogsi-ca4-db-1); echo "DB_IP=$DB_IP"
+  DB_IP=172.25.0.2
+  $ nc -z -w2 "$DB_IP" 9092 && echo "host -> db:9092 open"
+  host -> db:9092 open
+  $ docker run --rm --network bridge alpine sh -c "nc -z -w2 $DB_IP 9092 || echo 'other container (default bridge) -> db: blocked'"
+  other container (default bridge) -> db: blocked
+  ```
+
+  The address is read from Docker because it changes between runs: in this
+  run `db` got `172.25.0.2` on `backend`, while in the run recorded above
+  the two subnets were assigned the other way round.
+
+  Only users who can run commands on the host reach these addresses, and
+  they could equally use `docker exec`. From other machines, only the port
+  published by `proxy` is reachable. Blocking the host as well would take a
+  host firewall rule on locally generated traffic (the `OUTPUT` chain),
+  outside Compose; Docker's `DOCKER-USER` chain only sees forwarded
+  traffic, not connections started by the host.
 - `backend` is `internal: true`: it has no gateway to the outside, so
   `db` cannot even resolve an external name. The database has no reason to
   reach the internet, and a compromised `db` cannot use it to exfiltrate
@@ -1763,11 +1832,17 @@ Every value that may change between environments is a variable read from
 | db | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `bookstore`, required, required |
 | db | `H2_PORT`, `DB_JAVA_OPTS` | `H2_PORT`, `JAVA_OPTS`; storage `H2_DATA_DIR=/var/lib/h2` | `9092`, `-Xmx256m` |
 | web | `WEB_PORT` | `SERVER_PORT` | `8080` |
-| web | `DB_NAME`, `H2_PORT` | `SPRING_DATASOURCE_URL=jdbc:h2:tcp://db:<port>/./<name>` | |
+| web | `DB_NAME`, `H2_PORT` | `SPRING_DATASOURCE_URL=jdbc:h2:tcp://db:<port>/./<name>` | `bookstore`, `9092` |
 | web | `DB_USER`, `DB_PASSWORD` | `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | required |
 | web | `JPA_DDL_AUTO`, `JPA_SHOW_SQL`, `WEB_JAVA_OPTS` | `SPRING_JPA_*`, `JAVA_TOOL_OPTIONS` | `update`, `false`, `-XX:MaxRAMPercentage=75` |
 | proxy | `PROXY_PUBLISHED_PORT`, `PROXY_LISTEN_PORT` | host port, `NGINX_PORT` | `8080`, `80` |
 | proxy | `PROXY_UPSTREAM_HOST`, `WEB_PORT`, `PROXY_READ_TIMEOUT` | `UPSTREAM_HOST`, `UPSTREAM_PORT`, `PROXY_READ_TIMEOUT` | `web`, `8080`, `60s` |
+| each | `DB_MEM_LIMIT`, `DB_CPUS`, `WEB_MEM_LIMIT`, `WEB_CPUS`, `PROXY_MEM_LIMIT`, `PROXY_CPUS` | memory and CPU limits of the containers | `512m`, `1`, `768m`, `1.5`, `128m`, `0.5` |
+
+The data directory `/var/lib/h2` is the one fixed storage setting: it is
+where the image creates the directory owned by `h2` that the empty volume
+copies (section 5.3), so it belongs to the image, not to the environment.
+What is configurable is the database name and the volume behind it.
 
 - **One source per value.** `DB_USER` and `DB_PASSWORD` configure both
   sides, the database and the datasource, so they cannot drift apart.
@@ -1775,11 +1850,14 @@ Every value that may change between environments is a variable read from
   proxy.
 - **Required values fail early.** `${DB_PASSWORD:?...}` stops Compose before
   anything is created if the password is missing or empty, and the
-  template leaves it empty on purpose:
+  template leaves it empty on purpose. An empty value given in the shell
+  (which takes precedence over `.env`, next point) shows it without touching
+  the configured `.env`:
 
   ```console
-  $ cp CA4/part2/.env.example CA4/part2/.env && docker compose -f CA4/part2/compose.yaml config --quiet
+  $ DB_PASSWORD='' docker compose -f CA4/part2/compose.yaml config --quiet
   error while interpolating services.db.environment.DB_PASSWORD: required variable DB_PASSWORD is missing a value: set DB_PASSWORD in .env
+  error while interpolating services.web.environment.SPRING_DATASOURCE_PASSWORD: required variable DB_PASSWORD is missing a value: set DB_PASSWORD in .env
   ```
 
 - **Variables of the shell override `.env`.** The proxy was moved to
@@ -1802,6 +1880,85 @@ Every value that may change between environments is a variable read from
 > out of Git. For production, Compose `secrets:` mount the value as a file
 > (`/run/secrets/...`) instead. The Podman implementation (section 7) uses
 > Podman secrets.
+
+### 5.9. Publishing the images
+
+> Publish the images to Docker Hub
+
+Each service has both `build:` and `image:`. `docker compose build` tags the
+result with the `image:` name, `docker compose push` sends it to the registry
+in that name, and `docker compose pull` downloads it on another machine.
+The registry and account are the `IMAGE_NAMESPACE` variable, so the same
+file publishes anywhere; the tags are the application versions
+(`APP_VERSION`, `PROXY_VERSION`) and the H2 release (`H2_VERSION`):
+
+```console
+$ IMAGE_NAMESPACE=docker.io/rmotafreitas docker compose -f CA4/part2/compose.yaml config --images
+docker.io/rmotafreitas/cogsi-ca4-h2:2.4.240
+docker.io/rmotafreitas/cogsi-ca4-bookstore:1.0.0
+docker.io/rmotafreitas/cogsi-ca4-proxy:1.0.0
+```
+
+As in Part 1 (section 4.8), the machine is not logged in to Docker Hub, so
+the push was made to the local registry; the Docker Hub push is the same
+two commands with the default namespace once `docker login` is done:
+
+```bash
+docker login -u rmotafreitas
+docker compose -f CA4/part2/compose.yaml build && docker compose -f CA4/part2/compose.yaml push
+```
+
+With the local registry of section 4.8:
+
+```bash
+export IMAGE_NAMESPACE=localhost:5000/rmotafreitas
+docker compose -f CA4/part2/compose.yaml build
+docker compose -f CA4/part2/compose.yaml push
+for r in cogsi-ca4-h2 cogsi-ca4-bookstore cogsi-ca4-proxy; do curl -s localhost:5000/v2/rmotafreitas/$r/tags/list; echo; done
+```
+
+```console
+ localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240 Pushed
+ localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0 Pushed
+ localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0 Pushed
+{"name":"rmotafreitas/cogsi-ca4-h2","tags":["2.4.240"]}
+{"name":"rmotafreitas/cogsi-ca4-bookstore","tags":["1.0.0"]}
+{"name":"rmotafreitas/cogsi-ca4-proxy","tags":["1.0.0"]}
+```
+
+To check that the published images are enough to run the environment, the
+local copies were deleted and a second project (`-p cogsi-ca4-pulled`, its
+own networks and volume, the proxy on port 8095) was started without
+building:
+
+```bash
+export IMAGE_NAMESPACE=localhost:5000/rmotafreitas PROXY_PUBLISHED_PORT=8095
+for r in cogsi-ca4-h2:2.4.240 cogsi-ca4-bookstore:1.0.0 cogsi-ca4-proxy:1.0.0; do docker rmi localhost:5000/rmotafreitas/$r; done
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled up -d --pull always --no-build --wait
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+curl -s localhost:8095/books
+docker compose -f CA4/part2/compose.yaml -p cogsi-ca4-pulled down -v
+```
+
+```console
+ Image localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240 Pulling
+ Image localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0 Pulling
+ Image localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0 Pulling
+ ...
+SERVICE   IMAGE                                                   STATUS                    PORTS
+db        localhost:5000/rmotafreitas/cogsi-ca4-h2:2.4.240        Up 11 seconds (healthy)   9092/tcp
+proxy     localhost:5000/rmotafreitas/cogsi-ca4-proxy:1.0.0       Up 2 seconds (healthy)    0.0.0.0:8095->80/tcp, [::]:8095->80/tcp
+web       localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0   Up 9 seconds (healthy)    8080/tcp
+[{"author":"Robert C. Martin","id":1,"price":30.0,"title":"Clean Code"},{"author":"Joshua Bloch","id":2,"price":40.0,"title":"Effective Java"}, ...]
+```
+
+`--pull always` forces the download even if an image with that name exists
+locally, and `--no-build` makes Compose fail rather than build if an image is
+missing, so the environment came only from the registry. The new project
+started with an empty volume, so the database was created by the
+entrypoint, and the API answered with the sample data. The three images will
+also be attached, as `docker save` archives, to the GitHub release of the
+tag `ca4-part2` when it is created at the end of the assignment (section 8).
 
 ---
 
