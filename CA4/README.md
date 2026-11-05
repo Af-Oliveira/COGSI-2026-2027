@@ -1438,17 +1438,20 @@ mount: it does not depend on a path of the host, it is created with the
 owner of `/var/lib/h2` in the image, and `docker compose down` keeps it
 (only `down -v` deletes it).
 
+The SQL runs inside `db`, with the credentials of its own environment (the
+single quotes leave `$DB_USER` and `$DB_PASSWORD` to the container's shell,
+so the password never has to be typed on the host):
+
 ```bash
 C() { docker compose -f CA4/part2/compose.yaml "$@"; }
-C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
-  -user bookstore -password "$DB_PASSWORD" \
-  -sql "CREATE TABLE IF NOT EXISTS probe(id INT, note VARCHAR(40)); INSERT INTO probe VALUES (1, 'written before down')"
+sql() { C exec -T db sh -c 'java -cp /opt/h2/h2.jar org.h2.tools.Shell \
+  -url "jdbc:h2:tcp://localhost:$H2_PORT/./$DB_NAME" -user "$DB_USER" -password "$DB_PASSWORD" -sql "$1"' sh "$1"; }
+sql "CREATE TABLE IF NOT EXISTS probe(id INT, note VARCHAR(40)); INSERT INTO probe VALUES (1, 'written before down')"
 C down          # removes the containers and the networks
 docker volume ls --filter name=cogsi-ca4
 C up -d --wait
 C logs db | tail -3
-C exec -T db java -cp /opt/h2/h2.jar org.h2.tools.Shell -url jdbc:h2:tcp://localhost:9092/./bookstore \
-  -user bookstore -password "$DB_PASSWORD" -sql "SELECT * FROM probe"
+sql "SELECT * FROM probe"
 ```
 
 ```console
@@ -1775,11 +1778,14 @@ Every value that may change between environments is a variable read from
   proxy.
 - **Required values fail early.** `${DB_PASSWORD:?...}` stops Compose before
   anything is created if the password is missing or empty, and the
-  template leaves it empty on purpose:
+  template leaves it empty on purpose. An empty value given in the shell
+  (which takes precedence over `.env`, next point) shows it without touching
+  the configured `.env`:
 
   ```console
-  $ cp CA4/part2/.env.example CA4/part2/.env && docker compose -f CA4/part2/compose.yaml config --quiet
+  $ DB_PASSWORD='' docker compose -f CA4/part2/compose.yaml config --quiet
   error while interpolating services.db.environment.DB_PASSWORD: required variable DB_PASSWORD is missing a value: set DB_PASSWORD in .env
+  error while interpolating services.web.environment.SPRING_DATASOURCE_PASSWORD: required variable DB_PASSWORD is missing a value: set DB_PASSWORD in .env
   ```
 
 - **Variables of the shell override `.env`.** The proxy was moved to
