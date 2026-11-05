@@ -744,7 +744,8 @@ Reading the two histories from the bottom:
 - **Base image.** Ubuntu (117 MB), its packages (73.1 MB) and the JDK
   (309 MB) in version 1, 499 MB unpacked, against Alpine (9 MB), its
   packages (37.9 MB) and the JRE (165 MB) in versions 2 and 3, 212 MB. The
-  choice of base image alone explains 287 MB of unpacked layers.
+  choice of base image alone explains 287 MB (499 - 212) of unpacked
+  layers.
 - **Build steps.** Version 1 adds a layer per build step: `git` (78.5 MB,
   with its dependencies), the clone (4 MB), and the Gradle build (165 MB: the
   Gradle distribution, the dependency cache and the build output). The
@@ -952,9 +953,12 @@ USER     PID       NLWP   RSS     COMMAND
   database in Part 1 and only the logs are written. Part 2 moves the data
   to a volume.
 - **PIDs.** The column counts threads, not processes. It grows with the
-  load: Tomcat adds worker threads (29 to 67) and the chat server one thread
-  per client (19 to 50). `docker top` shows the same, 50 threads (`NLWP`)
-  in a single process.
+  load: Tomcat adds worker threads (29 to 67). The chat server goes from 19
+  to 50: one handler thread per client (20) plus JVM compiler and garbage
+  collector threads started under load. It stays at 50 after the clients
+  leave because `ChatServer` runs its handlers in a fixed pool of up to 500
+  threads (`Executors.newFixedThreadPool(500)`), which keeps idle threads.
+  `docker top` shows the same, 50 threads (`NLWP`) in a single process.
 
 ### 4.7. Running as a non-root user
 
@@ -974,20 +978,22 @@ git show aff35b6:CA4/part1/chat/v3/Dockerfile | docker build -f - -t cogsi-chat:
 docker run -d --name chat-v3-root cogsi-chat:v3-root
 ```
 
-In this container (`docker exec chat-v3-root ...`) the outputs are the ones
-below, taken when `chat-v3` still ran that same image:
-
 ```console
-$ docker exec chat-v3 id
+$ docker exec chat-v3-root id
 uid=0(root) gid=0(root) groups=0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
-$ docker exec chat-v3 sh -c 'touch /opt/chat/chat-server.jar && echo "can modify the application"; head -c 40 /etc/shadow'
+$ docker exec chat-v3-root sh -c 'touch /opt/chat/chat-server.jar && echo "can modify the application"; head -c 40 /etc/shadow'
 can modify the application
 root:*::0:::::
 bin:!::0:::::
 daemon:!::0
-$ ps -o user,pid,args -C java       # on the host
-root     2891067 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+$ ps -o user,pid,args -C java | grep ChatServerApp       # on the host
+10001    3085627 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+root     3146664 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
 ```
+
+On the host, the same program runs as UID 10001 in `chat-v3` (current
+image) and as `root` in `chat-v3-root`. The root container is then removed
+(`docker rm -f chat-v3-root`).
 
 Both version 3 Dockerfiles now create a system user and switch to it in the
 runtime stage ([chat](part1/chat/v3/Dockerfile),
@@ -1188,8 +1194,9 @@ docker load -i cogsi-chat-1.0-v3.tar.gz
 
 > At the end of this assignment mark your commit with the tag ca4-part1
 
-On `main`, after the pull request of section 4.8 was merged, the tag marks
-the end of Part 1, and a GitHub release on it carries the version 3 images:
+On `main`, after the pull request that completes Part 1 was merged, the tag
+marks the end of Part 1, and a GitHub release on it carries the version 3
+images:
 
 ```bash
 git switch main && git pull
@@ -1201,7 +1208,9 @@ docker save cogsi-chat:v3 | gzip > cogsi-chat-1.0-v3.tar.gz
 docker save cogsi-bookstore:v3 | gzip > cogsi-bookstore-1.0.0-v3.tar.gz
 sha256sum cogsi-*.tar.gz > SHA256SUMS
 gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
-  --title "CA4 Part 1" --notes-file notes.md cogsi-*.tar.gz SHA256SUMS
+  --title "CA4 Part 1" \
+  --notes "CA4 Part 1: version 3 images of the chat server and the Bookstore (docker load -i <file>)" \
+  cogsi-*.tar.gz SHA256SUMS
 ```
 
 ---
