@@ -1957,9 +1957,9 @@ web       localhost:5000/rmotafreitas/cogsi-ca4-bookstore:1.0.0   Up 9 seconds (
 locally, and `--no-build` makes Compose fail rather than build if an image is
 missing, so the environment came only from the registry. The new project
 started with an empty volume, so the database was created by the
-entrypoint, and the API answered with the sample data. The three images will
-also be attached, as `docker save` archives, to the GitHub release of the
-tag `ca4-part2` when it is created at the end of the assignment (section 8).
+entrypoint, and the API answered with the sample data. The three images are
+also attached, as `docker save` archives, to the GitHub release of the tag
+`ca4-part2`, created when the assignment was finished (section 8.2).
 
 ---
 
@@ -2637,10 +2637,164 @@ CA4/alternative/down.sh            # or: CA4/alternative/down.sh --purge
 
 ## 8. Operative guidelines and team work
 
-_Completed at the end of the assignment._
+> Use your own group's private repository. Create a folder for each class
+> assignment in the root of your repository [...] Continue to operate Git via
+> the command line. Create branches for each new implemented feature [...]
+> You will be using two different applications for this CA. Note: do not
+> copy the .git folder from the app's original repository [...] Create
+> issue(s) in GitHub for your main tasks [...] Make several commits while you
+> work (incremental, descriptive commit messages)
+
+**Folder.** Everything specific to CA4 is in `CA4/`. The two applications
+are not copied again: version 1 of each image clones the group repository,
+and the other versions and Part 2 use `CA1/part1` and `CA1/part2` as build
+contexts. Those are the CA1 imports, made without the `.git` folder of the
+original repositories.
+
+**Planning.** The assignment was planned as a sprint, like CA3:
+- a milestone, `Sprint 4 - CA4 Containerization`, due 8 November;
+- labels by family (`sprint: CA4`, `component: part1-images`,
+  `component: part2-compose`, `area: docker`, `area: compose`,
+  `area: registry`, `area: podman`, ...);
+- four epics (#68 Part 1, #69 Part 2, #70 alternative, #71 report), with the
+  twelve stories attached to them as sub-issues.
+
+Each story was assigned to one member, who authored its commits; the other
+member reviewed it and is the co-author.
+
+```bash
+# example: a story created with its labels, milestone and assignee
+gh issue create --title "Run H2 in server mode in a db container with a named volume and an SQL health check" \
+  --milestone "Sprint 4 - CA4 Containerization" \
+  --label "sprint: CA4" --label "component: part2-compose" --label "area: persistence" \
+  --assignee rmotafreitas --body-file story.md
+```
+
+| Issue | Story | Owner | Branch | Pull request |
+| --- | --- | --- | --- | --- |
+| #72 | Chat server images: clone, host JAR, multi-stage | Ricardo | `feature/ca4-chat-images` | #84 |
+| #73 | Bookstore images: clone, host JAR, multi-stage with layers | Afonso | `feature/ca4-bookstore-images` | #85 |
+| #74 | Comparison, `docker history`, `measure.sh` | Ricardo | `docs/ca4-image-comparison` | #86 |
+| #75 | Non-root user and resource monitoring | Afonso | `feature/ca4-nonroot-monitoring` | #87 |
+| #76 | Tags, publication and tag `ca4-part1` | Afonso | `feature/ca4-part1-publish` | #88 |
+| #77 | `db`: H2 server, volume, SQL health check | Ricardo | `feature/ca4-compose-db` | #89 |
+| #78 | `web`: Bookstore after `db` is healthy | Afonso | `feature/ca4-compose-web` | #90 |
+| #79 | `proxy`: Nginx, name resolution, variables | Ricardo | `feature/ca4-compose-proxy` | #91 |
+| #80 | Publication of the Part 2 images | Afonso | `feature/ca4-part2-publish` | #92 |
+| #81 | Alternatives: analysis and design | Ricardo | `docs/ca4-alternative-analysis` | #93 |
+| #82 | Alternative implemented with rootless Podman | Afonso | `feature/ca4-alternative-podman` | #94 |
+| #83 | Report, self-evaluation and tag `ca4-part2` | Ricardo | `docs/ca4-report` | this one |
+
+The Part 2 stories were developed as a stack: each branch started from the
+previous one (`compose-db` -> `compose-web` -> `compose-proxy` ->
+`part2-publish`), because each service depends on the previous one. The
+pull requests were merged in that order. Each story was reviewed before
+its merge. At the end of each part the whole part was reviewed again, and
+the corrections from that review went into the last pull request of the part
+(#88 for Part 1, #92 for Part 2, #94 for the alternative).
+
+**Commits.** The commits follow the Conventional Commits format
+(`feat(ca4): ...`, `fix(ca4): ...`, `docs(ca4): ...`, `chore: ...`). Each one
+references its issue (`Refs #N`, and `Closes #N` in the last one, which
+closes the issue when the pull request is merged) and names the reviewer
+with a `Co-authored-by` trailer:
+
+```bash
+git log --format='%h %an | %s' --no-merges -- CA4/part2 | tail -5
+```
+
+```console
+f448310 Ricardo Freitas | feat(ca4): make proxy the only entry point, after web is healthy
+d11def9 Ricardo Freitas | feat(ca4): add the Nginx proxy image with an environment template
+587e40d Afonso Guilherme Vieira da Silva Oliveira | feat(ca4): run the Bookstore as web after db is healthy
+5fd9330 Ricardo Freitas | feat(ca4): run db with Compose, a named volume and an internal network
+baf79aa Ricardo Freitas | feat(ca4): add the H2 server image with a verified JAR and an SQL health check
+```
+
+### 8.1. Self-evaluation
+
+> Include a self-evaluation for each team member on a 0 - 100% scale
+> representing their contribution
+
+| Team member | Contribution |
+| --- | --- |
+| Afonso Oliveira (`Af-Oliveira`) | 50% |
+| Ricardo Freitas (`rmotafreitas`) | 50% |
+
+The twelve stories were split six and six (table above), and each member
+reviewed the work of the other before it was merged.
+
+### 8.2. Tags and releases
+
+> At the end of this assignment mark your commit with the tag ca4-part1 [...]
+> At the end of the assignment mark your commit with the tag ca4-part2
+
+| Tag | Commit | Marks | Release assets |
+| --- | --- | --- | --- |
+| `ca4-part1` | `10db6a2`, merge of #88 | end of Part 1 (section 4.9) | `cogsi-chat-1.0-v3.tar.gz`, `cogsi-bookstore-1.0.0-v3.tar.gz`, `SHA256SUMS` |
+| `ca4-part2` | the merge of this report's pull request | end of the assignment | the three Part 2 images (`docker save`), `SHA256SUMS` |
+
+As with `ca4-part1`, the tag `ca4-part2` is created on `main` after the last
+pull request is merged, and its release carries the images of Part 2:
+
+```bash
+git switch main && git pull
+git tag -a ca4-part2 -m "CA4: Docker Compose environment, Podman alternative and report"
+git push origin ca4-part2
+
+mkdir -p /tmp/ca4-release-part2 && cd /tmp/ca4-release-part2
+docker save rmotafreitas/cogsi-ca4-h2:2.4.240 | gzip > cogsi-ca4-h2-2.4.240.tar.gz
+docker save rmotafreitas/cogsi-ca4-bookstore:1.0.0 | gzip > cogsi-ca4-bookstore-1.0.0.tar.gz
+docker save rmotafreitas/cogsi-ca4-proxy:1.0.0 | gzip > cogsi-ca4-proxy-1.0.0.tar.gz
+sha256sum cogsi-ca4-*.tar.gz > SHA256SUMS
+gh release create ca4-part2 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
+  --title "CA4 Part 2" \
+  --notes "CA4 Part 2: images of the db, web and proxy services (docker load -i <file>)" \
+  cogsi-ca4-*.tar.gz SHA256SUMS
+```
+
+The images are not on Docker Hub (sections 4.8 and 5.9): the account is not
+logged in on the machine used for the assignment. Pushing them is one
+command per part once it is (`REGISTRY=docker.io CA4/part1/publish.sh` and
+`docker compose -f CA4/part2/compose.yaml push`).
 
 ---
 
 ## 9. References
 
-_Completed at the end of the assignment._
+- Docker documentation:
+  - Dockerfile reference (`ADD --checksum`, `RUN --mount=type=cache`, `USER`): <https://docs.docker.com/reference/dockerfile/>
+  - Build context and `.dockerignore`, including Dockerfile-specific ignore files: <https://docs.docker.com/build/concepts/context/>
+  - Multi-stage builds: <https://docs.docker.com/build/building/multi-stage/>
+  - `docker image history`: <https://docs.docker.com/reference/cli/docker/image/history/>
+  - `docker container stats`: <https://docs.docker.com/reference/cli/docker/container/stats/>
+  - containerd image store: <https://docs.docker.com/engine/storage/containerd/>
+  - Bake entitlements (`fs.read`): <https://docs.docker.com/build/bake/reference/>
+- Docker Compose:
+  - Services reference (`depends_on`, `healthcheck`, `deploy.resources`): <https://docs.docker.com/reference/compose-file/services/>
+  - Variable interpolation and `.env`: <https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/>
+  - Networks and `internal`: <https://docs.docker.com/reference/compose-file/networks/>
+  - Volumes: <https://docs.docker.com/reference/compose-file/volumes/>
+- Docker networking:
+  - Bridge networks and the embedded DNS server: <https://docs.docker.com/engine/network/drivers/bridge/>
+  - Docker and iptables: <https://docs.docker.com/engine/network/firewall-iptables/>
+- Docker security, rootless mode and user namespaces: <https://docs.docker.com/engine/security/>
+- Spring Boot - efficient container images, layering and `jarmode=tools`: <https://docs.spring.io/spring-boot/reference/packaging/efficient.html>
+- Spring Boot - externalized configuration (relaxed binding of environment variables): <https://docs.spring.io/spring-boot/reference/features/external-config.html>
+- Spring Boot Actuator - endpoints and their exposure: <https://docs.spring.io/spring-boot/reference/actuator/endpoints.html>
+- Eclipse Temurin images: <https://hub.docker.com/_/eclipse-temurin>
+- H2 - `org.h2.tools.Server` and `org.h2.tools.Shell`, remote database creation: <https://h2database.com/html/tutorial.html>
+- Nginx official image - configuration templates and local resolvers: <https://hub.docker.com/_/nginx>
+- Nginx - `resolver` and `proxy_pass` with variables: <https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver>
+- Distribution registry (`registry:3`): <https://distribution.github.io/distribution/>
+- Trivy: <https://trivy.dev/>
+- Podman:
+  - Rootless containers: <https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md>
+  - Quadlet (`podman-systemd.unit(5)`): <https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html>
+  - `podman secret create`: <https://docs.podman.io/en/latest/markdown/podman-secret-create.1.html>
+  - Short-name resolution (`containers-registries.conf(5)`): <https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md>
+- podman-compose: <https://github.com/containers/podman-compose>
+- nerdctl: <https://github.com/containerd/nerdctl>
+- Incus: <https://linuxcontainers.org/incus/docs/main/>
+- Apptainer: <https://apptainer.org/docs/user/latest/>
+- COGSI course material: the CA4 assignment and the containerization classes.
