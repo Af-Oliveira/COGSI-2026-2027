@@ -1,0 +1,4 @@
+# The context is this directory and the image needs only the two scripts.
+*
+!entrypoint.sh
+!healthcheck.sh
