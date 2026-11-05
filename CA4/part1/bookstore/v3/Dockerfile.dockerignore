@@ -1,8 +1,10 @@
-# The build stage compiles from the sources, so the host's build output and
-# Gradle caches are excluded (large, they would invalidate the COPY cache and
-# could leak host-compiled classes into the image). The tests are not run in
-# the image, so their sources are excluded too: a change to a test does not
-# rebuild the image.
+# The build stage compiles the sources itself, so the host's build output
+# (build/, 54 MB) and Gradle caches must never reach it. BuildKit only sends
+# the paths named by the COPY instructions (build scripts, gradle/, src/main/),
+# so today these rules do not change the context; they keep the image
+# independent of the host if a broader COPY is added, and they apply to
+# builders that send the whole context (legacy builder, Buildah/Podman).
+# The tests do not run in the image, so their sources are excluded as well.
 .gradle/
 build/
 .kotlin/
