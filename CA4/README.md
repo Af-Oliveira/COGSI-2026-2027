@@ -2022,6 +2022,69 @@ The main differences for CA4:
   no health checks and no orchestration, which leaves most of Part 2 without
   support.
 
+### 6.3. Design of CA4 with each tool
+
+**Podman.**
+
+- Part 1: the same Dockerfiles, built with `podman build -f <Dockerfile>
+  <context>` (Buildah reads `Dockerfile.dockerignore` too); the base images
+  need fully qualified names or short-name aliases, because Podman does not
+  assume Docker Hub; the containers run rootless with `podman run -p`,
+  observed with `podman stats`; `podman push` to Docker Hub.
+- Part 2: Quadlet files in `~/.config/containers/systemd/`: a `.network`
+  per tier (`Internal=true` for the backend), a `.volume` for the H2 data and
+  a `.container` per service with `EnvironmentFile=`, `HealthCmd=` and
+  `Notify=healthy`. systemd starts `web` only after `db` reports healthy
+  (`Requires=` and `After=` on the generated `db.service`), and `proxy` after
+  `web`.
+
+**containerd + nerdctl.**
+
+- Part 1: `nerdctl build` with the same Dockerfiles (BuildKit, so the
+  Dockerfile-specific ignore files work), `nerdctl run`, `nerdctl stats`,
+  `nerdctl push`.
+- Part 2: the same `compose.yaml` with `nerdctl compose up`. If the
+  installed version does not wait for `service_healthy`, a wrapper script
+  polls the health endpoint before starting the next service.
+
+**Incus.**
+
+- Part 1: one system container per application (`incus launch
+  images:ubuntu/24.04 chat`), configured by cloud-init or Ansible as in
+  CA2/CA3, then published as an image (`incus publish chat --alias
+  cogsi-chat`). The three build strategies map to: build inside the
+  container, push the JAR from the host (`incus file push`), or publish a
+  container built from another one.
+- Part 2: three containers on a managed bridge (`db.incus`, `web.incus`,
+  `proxy.incus`), a custom storage volume attached to `db` for the H2 files,
+  limits in a profile, `incus config device add proxy http proxy
+  listen=tcp:0.0.0.0:8080 connect=tcp:127.0.0.1:80` for the entry point,
+  and the start order handled by the CA3 health checks.
+
+**Apptainer.**
+
+- Part 1: a `.def` file per application (`Bootstrap: docker`,
+  `From: eclipse-temurin:21-jdk`, `%post` to clone and build, `%runscript`
+  to start), or `apptainer build chat.sif docker-daemon://cogsi-chat:v3` to
+  convert an existing image. The three versions are only partly
+  reproducible: there are no multi-stage builds in the same sense (a
+  second `.def` can copy files from the first SIF with `%files from`).
+- Part 2: three instances on the host network, started in order by a script
+  that waits for each port; the H2 data directory as a bind mount. No
+  network isolation between tiers.
+
+### 6.4. Choice
+
+Podman is implemented in [section 7](#7-alternative-solution---implementation):
+
+- It is the alternative that changes the most while keeping the work of
+  Part 1: no daemon, rootless by default, health checks and start order
+  through systemd instead of the Docker daemon.
+- Every Part 1 and Part 2 requirement has a counterpart (unlike Apptainer),
+  and the images remain the same (unlike Incus), so the differences found are
+  about the tool and not about the application.
+- nerdctl would be too close to Docker to show a different design.
+
 ---
 
 ## 7. Alternative solution - implementation
