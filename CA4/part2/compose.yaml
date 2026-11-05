@@ -1,0 +1,49 @@
+# =============================================================================
+# CA4 Part 2 - the CA2 Part 2 environment with Docker Compose
+# -----------------------------------------------------------------------------
+#   db     H2 in server mode, data in a volume      networks: backend (internal)
+#
+# Every setting comes from the environment; copy .env.example to .env first.
+#
+#   cd CA4/part2 && cp .env.example .env && docker compose up -d --build
+# =============================================================================
+
+name: cogsi-ca4
+
+services:
+  db:
+    image: ${IMAGE_NAMESPACE:-rmotafreitas}/cogsi-ca4-h2:${H2_VERSION:-2.4.240}
+    build:
+      context: ./db
+      args:
+        H2_VERSION: ${H2_VERSION:-2.4.240}
+    environment:
+      # Credentials and storage settings. The credentials are applied when the
+      # database is created, on the first start with an empty volume.
+      DB_NAME: ${DB_NAME:-bookstore}
+      DB_USER: ${DB_USER:?set DB_USER in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      H2_PORT: ${H2_PORT:-9092}
+      H2_DATA_DIR: /var/lib/h2
+      JAVA_OPTS: ${DB_JAVA_OPTS:--Xmx256m}
+    volumes:
+      - h2-data:/var/lib/h2
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/h2-healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    restart: unless-stopped
+
+networks:
+  # No route outside the host: db is reachable only from the services
+  # attached to this network.
+  backend:
+    internal: true
+
+volumes:
+  h2-data: {}
