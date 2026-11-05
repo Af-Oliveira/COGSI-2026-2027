@@ -1,0 +1,8 @@
+# The context is CA1/part1, but the image needs only the artifacts built on
+# the host. Everything else is excluded, then the build output is re-included:
+# sources, the Gradle caches (.gradle, several hundred MB) and the other build
+# directories are never sent to the builder, which makes the context small and
+# the COPY layers depend only on the JARs.
+*
+!app/build/libs/chat-server-*.jar
+!app/build/libs/lib/
