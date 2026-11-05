@@ -55,6 +55,8 @@ Ansible. CA4 packages the same applications in containers:
 | Docker Engine | 29.9.2 (API 1.56) | containerd 2.4.2 image store |
 | Docker Buildx | 0.38.1 | BuildKit: cache mounts, Dockerfile-specific ignore files |
 | Docker Compose | 5.6.1 | Part 2; `start_interval` in the health checks needs Docker Engine 25 and Compose 2.20 or later |
+| Podman | 5.4.2, rootless, Debian package | alternative (section 7), with Quadlet and systemd 257 user services |
+| podman-compose | 1.3.0, Debian package | alternative, comparison only (section 7.5) |
 | JDK on the host | OpenJDK 21.0.4 | only for version 2 of each image and for the chat client |
 | Base images | `eclipse-temurin:21.0.13_9-jdk`, `eclipse-temurin:21.0.13_9-jre-alpine` | pinned to a JDK release, see [section 4.1](#41-build-strategies-and-base-images) |
 
@@ -1358,6 +1360,9 @@ ENTRYPOINT ["/usr/local/bin/h2-entrypoint"]
   volume is mounted there for the first time, Docker copies the directory
   of the image into it, owner and mode included, so the volume is writable
   by the server and nobody else.
+- **Ignore file.** The build context is `part2/db/`, and
+  [`.dockerignore`](part2/db/.dockerignore) is an allow list with the two
+  scripts: nothing else in the directory can reach the image.
 
 [`part2/db/entrypoint.sh`](part2/db/entrypoint.sh) creates the database on
 the first start and then replaces itself with the server (`exec`, so the JVM
@@ -1701,6 +1706,8 @@ server {
 
 - **`Host $http_host`** passes the host and port the client used
   (`localhost:8080`), so the HATEOAS links point to the proxy, as in CA2.
+- **Ignore file.** [`part2/proxy/.dockerignore`](part2/proxy/.dockerignore)
+  lets only `templates/` into the context of the proxy image.
 - **`/nginx-health`** answers locally, without going to `web`, and is the
   proxy's health check.
 - **What the proxy exposes.** Everything under `/` goes to the Bookstore,
@@ -1999,8 +2006,8 @@ Docker daemon were considered:
 | Image format and registries | OCI / Docker, any registry | OCI / Docker, any registry | OCI / Docker, any registry | its own image servers; OCI registries for application containers since Incus 6.3 | SIF file; pulls OCI images and pushes SIF to OCI registries (ORAS) |
 | Multi-container definition | Compose | `podman compose` (runs podman-compose or docker-compose), `podman kube play` (Kubernetes YAML), Quadlet (systemd units) | `nerdctl compose` | profiles, cloud-init or Ansible | none (instances started by scripts) |
 | Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default; network namespaces with CNI (`--net --network`) as root or with administrator configuration |
-| Health checks | `HEALTHCHECK`, `healthcheck:` | `HEALTHCHECK`, `--health-*`, run by systemd timers | depends on the nerdctl version | none (systemd inside the container) | none |
-| Start after a dependency is healthy | `depends_on: condition: service_healthy` | Quadlet `Notify=healthy` + `Requires=`/`After=` (podman-compose 1.3.0 ignores the condition, section 7) | depends on the nerdctl version | systemd ordering inside, none between containers | none |
+| Health checks | `HEALTHCHECK`, `healthcheck:` | `HEALTHCHECK`, `--health-*`, run by systemd timers | depends on the nerdctl version (not verified here) | none (systemd inside the container) | none |
+| Start after a dependency is healthy | `depends_on: condition: service_healthy` | Quadlet `Notify=healthy` + `Requires=`/`After=` (podman-compose 1.3.0 ignores the condition, section 7) | depends on the nerdctl version (not verified here) | systemd ordering inside, none between containers | none |
 | Volumes | named volumes, bind mounts | the same | the same | storage volumes, disk devices | bind mounts, overlay images |
 | Resource monitoring | `docker stats` | `podman stats`, `podman pod stats` | `nerdctl stats` | `incus info`, `incus top` | `apptainer instance stats` (cgroups v2) |
 | Integration with the init system | restart policies of the daemon | `podman generate systemd` (deprecated), Quadlet | restart policies | the daemon starts its instances | none |
@@ -2066,7 +2073,7 @@ The main differences for CA4:
 **Apptainer.**
 
 - Part 1: a `.def` file per application (`Bootstrap: docker`,
-  `From: eclipse-temurin:21-jdk`, `%post` to clone and build, `%runscript`
+  `From: eclipse-temurin:21.0.13_9-jdk`, `%post` to clone and build, `%runscript`
   to start), or `apptainer build chat.sif docker-daemon://cogsi-chat:v3` to
   convert an existing image. The three versions map directly: version 3
   is a multi-stage definition file, with a `Stage: build` section that
@@ -2126,6 +2133,7 @@ replaces the tool that builds and runs the containers, not the images.
 
 ```bash
 sudo apt install -y podman podman-compose uidmap passt slirp4netns fuse-overlayfs
+podman --version
 podman info --format '{{.Host.Security.Rootless}} {{.Host.NetworkBackend}} {{.Store.GraphDriverName}} {{.Host.CgroupsVersion}} {{.Host.CgroupManager}}'
 grep "$USER" /etc/subuid
 podman unshare cat /proc/self/uid_map
@@ -2205,7 +2213,8 @@ localhost/cogsi-chat:v3               212 MB
   `secret.txt` that the ignore file excludes and a `COPY . /ctx`: neither
   Docker nor Podman copied it.
 - **Sizes.** Podman reports the unpacked size of the image (212 MB for the
-  chat server), the sum of the layers that `docker history` lists. Docker's
+  chat server), close to the sum of the layers that `docker history` lists
+  (about 214 MB). Docker's
   291 MB for the same image also counts the compressed copy kept by the
   containerd store (section 2).
 - **Names.** Local images get the prefix `localhost/`.
@@ -2278,9 +2287,12 @@ HealthRetries=3
 HealthStartPeriod=30s
 HealthStartupCmd=/usr/local/bin/h2-healthcheck
 HealthStartupInterval=2s
+# Memory and CPU limits, as in compose.yaml; expanded by systemd from limits.env.
+PodmanArgs=--memory=${DB_MEM_LIMIT} --cpus=${DB_CPUS}
 Notify=healthy
 
 [Service]
+EnvironmentFile=%h/.config/cogsi-ca4/limits.env
 Restart=on-failure
 TimeoutStartSec=180
 
@@ -2326,7 +2338,7 @@ How each Compose requirement is met:
 | `proxy` after `web` is healthy | the same | the same, one level up |
 | Environment variables | `.env` interpolated into `environment:` | `podman.env` -> one `EnvironmentFile=` per service, written by `up.sh` |
 | Database password | variable in `.env` | Podman secret (below) |
-| Restart | `restart: unless-stopped` | `Restart=on-failure` of systemd |
+| Restart | `restart: unless-stopped` | `Restart=on-failure` of systemd: restarts after a crash, but not after a clean exit as `unless-stopped` does (`Restart=always` would be the exact match) |
 | Memory and CPU limits | `deploy.resources.limits` | `PodmanArgs=--memory=${WEB_MEM_LIMIT} --cpus=${WEB_CPUS}` (Podman 5.4's Quadlet has no dedicated key), expanded by systemd from `limits.env` |
 
 `Notify=healthy` is what makes the order work. The container runs with
@@ -2351,8 +2363,8 @@ ExecStart=/usr/bin/podman run --name web --cidfile=%t/%N.cid --replace --rm --cg
 
 [`up.sh`](alternative/up.sh) reads
 [`podman.env`](alternative/podman.env.example), the same variables as
-`part2/.env.example`, and writes `~/.config/cogsi-ca4/db.env`, `web.env` and
-`proxy.env` (mode 0600), doing the mapping that Compose does with
+`part2/.env.example`, and writes `~/.config/cogsi-ca4/db.env`, `web.env`,
+`proxy.env` and `limits.env` (mode 0600), doing the mapping that Compose does with
 interpolation (`DB_USER` becomes `DB_USER` for `db` and
 `SPRING_DATASOURCE_USERNAME` for `web`, and so on). The password is not in
 any of them: `up.sh` asks for it once and stores it as a Podman secret,
@@ -2683,7 +2695,7 @@ gh issue create --title "Run H2 in server mode in a db container with a named vo
 | #80 | Publication of the Part 2 images | Afonso | `feature/ca4-part2-publish` | #92 |
 | #81 | Alternatives: analysis and design | Ricardo | `docs/ca4-alternative-analysis` | #93 |
 | #82 | Alternative implemented with rootless Podman | Afonso | `feature/ca4-alternative-podman` | #94 |
-| #83 | Report, self-evaluation and tag `ca4-part2` | Ricardo | `docs/ca4-report` | this one |
+| #83 | Report, self-evaluation and tag `ca4-part2` | Ricardo | `docs/ca4-report` | #95 |
 
 The Part 2 stories were developed as a stack: each branch started from the
 previous one (`compose-db` -> `compose-web` -> `compose-proxy` ->
@@ -2695,8 +2707,9 @@ the corrections from that review went into the last pull request of the part
 
 **Commits.** The commits follow the Conventional Commits format
 (`feat(ca4): ...`, `fix(ca4): ...`, `docs(ca4): ...`, `chore: ...`). Each one
-references its issue (`Refs #N`, and `Closes #N` in the last one, which
-closes the issue when the pull request is merged) and names the reviewer
+references its issue (`Refs #N`, and `Closes #N` in the last one or in the
+pull request, which closes the issue when the pull request is merged; #76
+was closed by hand after the release of `ca4-part1`) and names the reviewer
 with a `Co-authored-by` trailer:
 
 ```bash
@@ -2732,10 +2745,11 @@ reviewed the work of the other before it was merged.
 | Tag | Commit | Marks | Release assets |
 | --- | --- | --- | --- |
 | `ca4-part1` | `10db6a2`, merge of #88 | end of Part 1 (section 4.9) | `cogsi-chat-1.0-v3.tar.gz`, `cogsi-bookstore-1.0.0-v3.tar.gz`, `SHA256SUMS` |
-| `ca4-part2` | the merge of this report's pull request | end of the assignment | the three Part 2 images (`docker save`), `SHA256SUMS` |
+| `ca4-part2` | the merge of #95 | end of the assignment | the three Part 2 images (`docker save`), `SHA256SUMS` |
 
 As with `ca4-part1`, the tag `ca4-part2` is created on `main` after the last
-pull request is merged, and its release carries the images of Part 2:
+pull request is merged, in the main working copy of the repository, and its
+release carries the images of Part 2:
 
 ```bash
 git switch main && git pull
