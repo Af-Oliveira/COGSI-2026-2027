@@ -59,9 +59,12 @@ Ansible. CA4 packages the same applications in containers:
 | Base images | `eclipse-temurin:21.0.13_9-jdk`, `eclipse-temurin:21.0.13_9-jre-alpine` | pinned to a JDK release, see [section 4.1](#41-build-strategies-and-base-images) |
 
 > The images use the containerd image store, the default of Docker Engine 29.
-> `docker image ls` shows two sizes: **disk usage** (the unpacked layers) and
-> **content size** (the compressed layers, which is what is downloaded from a
-> registry).
+> `docker image ls` shows two sizes. **Content size** is the compressed
+> layers, what a `docker pull` downloads. **Disk usage** is everything the
+> image occupies on the host: the unpacked layers (the sizes that
+> `docker history` lists) **plus** the compressed copy kept in the content
+> store. For the JRE base image: 212 MB unpacked + 75.1 MB compressed =
+> 287 MB of disk usage.
 
 ---
 
@@ -80,7 +83,8 @@ CA4/
     │   ├── v1/
     │   ├── v2/
     │   └── v3/
-    └── measure.sh            builds, inspects and scans the six images (section 4.4)
+    ├── measure.sh            builds, inspects and scans the six images (section 4.4)
+    └── publish.sh            tags and pushes the six images to a registry (section 4.8)
 ```
 
 The applications are not copied into `CA4/`: versions 2 and 3 use `CA1/part1`
@@ -130,10 +134,11 @@ Choices common to every image:
 - **Exec form for `ENTRYPOINT`.** `java` runs as PID 1, without a shell in
   between, and receives the `SIGTERM` sent by `docker stop`. The port is the
   `CMD`, so it can be replaced at `docker run` time.
-- **Dockerfile-specific ignore files.** The three versions of an application
+- **Dockerfile-specific ignore files.** Versions 2 and 3 of an application
   share the same build context (the CA1 project) but need different files
-  from it. BuildKit reads `<Dockerfile name>.dockerignore` next to the
-  Dockerfile before the `.dockerignore` of the context, so each version has
+  from it, and version 1 needs none. When a file named
+  `<Dockerfile name>.dockerignore` exists next to the Dockerfile, BuildKit
+  uses it instead of the `.dockerignore` of the context, so each version has
   its own `Dockerfile.dockerignore` and nothing is added to the CA1 folders.
 
 ### 4.2. Chat server
@@ -187,7 +192,8 @@ docker build -t cogsi-chat:v1 CA4/part1/chat/v1
 ```
 
 The context is the `v1/` directory itself, and its ignore file excludes
-everything (`*`): the builder receives 0 bytes from the host.
+everything (`*`): the builder receives an empty context (`transferring
+context: 25B` in the build log, the size of the empty archive).
 
 #### Version 2 - JAR built on the host
 
@@ -319,8 +325,7 @@ MESSAGE alice: hello from the host
 the host, with the `runClient` task, against version 3:
 
 ```bash
-cd CA1/part1
-./gradlew runClient -PserverIP=localhost -PserverPort=59003
+(cd CA1/part1 && ./gradlew runClient -PserverIP=localhost -PserverPort=59003)
 ```
 
 ![The chat client on the host asks for a screen name after the server in chat-v3 sent SUBMITNAME](assets/part1-chat-client-name.png)
@@ -388,10 +393,12 @@ EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
 ```
 
-`build/libs` on the host also holds `bookstore-1.0.0-plain.jar`, made by the
-`jar` task during a full `build`. It matches `bookstore-*.jar` too, and a
-`COPY` of two files to one destination file fails. The ignore file therefore
-re-includes the executable JAR and excludes the plain one again:
+`bootJar` alone leaves only `bookstore-1.0.0.jar` in `build/libs`, but a
+full `./gradlew build` (run in CA1, or by anyone who runs the tests) also
+leaves `bookstore-1.0.0-plain.jar`, made by the `jar` task. It matches
+`bookstore-*.jar` too, and a `COPY` of two files to one destination file
+fails. The ignore file therefore re-includes the executable JAR and excludes
+the plain one again, so the build works whatever was built before:
 
 ```text
 *
@@ -435,7 +442,9 @@ ENTRYPOINT ["java", "-jar", "/opt/bookstore/bookstore.jar"]
 #17 0.739 spring-boot-loader
 ```
 
-`extract` writes the 80 libraries to `lib/` and a thin `bookstore.jar` whose
+`extract` writes 80 libraries to `lib/` (the executable JAR nests 81; the
+81st, `spring-boot-jarmode-tools`, only serves the extraction and is left
+out) and a thin `bookstore.jar` whose
 manifest lists them in its `Class-Path`, so `java -jar` still works and there
 is no unpacking of nested JARs at start-up. The ignore file excludes the build
 output and caches of the host, as in the chat server, and also
@@ -509,34 +518,52 @@ CA4/part1/measure.sh --skip-build  # inspects the existing images only
   build, and `--no-cache` is used. The base images are already pulled, so
   the network only serves Gradle and its dependencies. Version 2 counts two
   steps: `./gradlew clean <task>` on the host and `docker build`.
-- **Disk usage** is the unpacked size of all the layers; **content size** is
-  the compressed size, what a `docker pull` downloads.
+- **Disk usage** is what the image occupies on the host: unpacked layers
+  plus the compressed copy (section 2); **content size** is the compressed
+  size, what a `docker pull` downloads.
 - **Layers** counts the filesystem layers (`RootFS.Layers`); **history
   entries** also counts the instructions that only change metadata.
-- **JDK compiler, git, Gradle cache, sources** are tested inside the image
-  (`command -v javac`, `command -v git`, `test -d /root/.gradle`,
-  `test -d /src`), and **OS packages** counts the `dpkg` or `apk` packages.
+- **JDK compiler, git, Gradle cache, sources** are tested inside the image,
+  as root so that the non-root images cannot hide `/root` (mode 0700):
+  `command -v javac`, `command -v git`, `test -d /root/.gradle`,
+  `test -d /src`. **OS packages** counts the `dpkg` or `apk` packages.
 - **CVEs** are the HIGH and CRITICAL vulnerabilities found by
   [Trivy](https://trivy.dev) 0.76.1, run as a container with access to the
   Docker socket.
 
+The table is the second complete run, made after the version 3 images
+gained their non-root user (section 4.7). The first run, before that
+change, gave the same sizes, packages and CVEs, one layer less for each
+version 3 image, and these build times: chat 39.3 / 5.1 + 6.9 / 31.8 s,
+Bookstore 65.0 / 6.4 + 5.9 / 55.0 s.
+
 | Image | Build time (s) | Disk usage | Content size | Layers | History entries | JDK compiler | git | Gradle cache | Sources | OS packages | HIGH / CRITICAL CVEs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cogsi-chat:v1` | 39.3 | 1.14GB | 395MB | 11 | 27 | yes | yes | yes | yes | 158 | 15 / 2 |
-| `cogsi-chat:v2` | 5.1 + 6.9 | 291MB | 76.3MB | 7 | 16 | no | no | no | no | 73 | 3 / 0 |
-| `cogsi-chat:v3` | 31.8 | 291MB | 76.3MB | 6 | 15 | no | no | no | no | 73 | 3 / 0 |
-| `cogsi-bookstore:v1` | 65.0 | 1.55GB | 563MB | 10 | 25 | yes | yes | yes | yes | 158 | 30 / 14 |
-| `cogsi-bookstore:v2` | 6.4 + 5.9 | 393MB | 125MB | 6 | 14 | no | no | no | no | 73 | 8 / 4 |
-| `cogsi-bookstore:v3` | 55.0 | 392MB | 124MB | 10 | 18 | no | no | no | no | 73 | 8 / 4 |
+| `cogsi-chat:v1` | 36.5 | 1.14GB | 395MB | 11 | 27 | yes | yes | yes | yes | 158 | 15 / 2 |
+| `cogsi-chat:v2` | 5.2 + 5.4 | 291MB | 76.3MB | 7 | 16 | no | no | no | no | 73 | 3 / 0 |
+| `cogsi-chat:v3` | 27.5 | 291MB | 76.3MB | 7 | 17 | no | no | no | no | 73 | 3 / 0 |
+| `cogsi-bookstore:v1` | 71.1 | 1.55GB | 563MB | 10 | 25 | yes | yes | yes | yes | 158 | 30 / 14 |
+| `cogsi-bookstore:v2` | 5.9 + 7.3 | 393MB | 125MB | 6 | 14 | no | no | no | no | 73 | 8 / 4 |
+| `cogsi-bookstore:v3` | 149.3 ¹ | 392MB | 124MB | 11 | 20 | no | no | no | no | 73 | 8 / 4 |
 
-**Build time.** Version 2 is the fastest by far (12 s) because the host
-already has the Gradle distribution and every dependency in `~/.gradle`:
-its `docker build` only copies files. Versions 1 and 3 download Gradle 9.4
-(about 130 MB) and the dependencies on every cold build, which is most of
-their 32 to 65 s. Version 3 is still faster than version 1: it does not
-install `git` with `apt` nor clone the repository. The cold build is the
-worst case for version 3. On a rebuild, its layer order and cache mount pay
-off. After a one-line change to `ChatServerApp.java`:
+¹ 115.0 s of it was the dependency download (55.0 s for the whole build in
+the first run); see the build-time paragraph.
+
+**Build time.** Version 2 is the fastest by far (11 to 13 s) because the
+host already has the Gradle distribution and every dependency in
+`~/.gradle`: its `docker build` only copies files. Versions 1 and 3
+download Gradle 9.4 (about 130 MB) and the dependencies on every cold build,
+so their time is mostly network time and varies between runs. For the chat
+server, version 3 was faster than version 1 in both runs (27.5 against
+36.5 s): it does not install `git` with `apt` nor clone the repository. For
+the Bookstore, version 3 took 55.0 s in the first run and 149.3 s in the
+second, against 65.0 and 71.1 s for version 1. The build log shows where
+the second run went: the step that only downloads the dependencies
+(`gradlew dependencies`) took 115.0 s on its own, against 22.7 s for the
+compilation. A cold build of versions 1 and 3 measures the network as much
+as the build. The cold build is also the worst case for version 3. On a
+rebuild, its layer order and cache mount pay off. After a one-line change
+to `ChatServerApp.java`:
 
 ```console
 #11 [build 5/8] COPY app/build.gradle app/
@@ -551,7 +578,7 @@ docker build ... 7.765 total
 ```
 
 Only the sources were copied again and compiled, with Gradle and the
-dependencies taken from the cache mount (7.8 s instead of 31.8 s). The
+dependencies taken from the cache mount (7.8 s instead of about 30 s cold). The
 change was a comment, so the compiled JAR came out byte-for-byte identical
 (Gradle 9 builds reproducible archives), and BuildKit, which compares
 content, reused even the runtime layer. Version 1 behaves the opposite way:
@@ -560,8 +587,10 @@ commit in the repository is **not** picked up. Version 1 only sees new code
 with `--no-cache` or a new `REPO_REF`.
 
 **Image size.** Versions 2 and 3 are the same size (291 MB for the chat
-server, 392-393 MB for the Bookstore): both are the 280 MB JRE Alpine image
-plus the application (2.4 MB for the chat server, 56 MB for the Bookstore).
+server, 392-393 MB for the Bookstore): both are the JRE Alpine image (287 MB
+of disk usage: 212 MB unpacked plus 75.1 MB compressed) plus the
+application, counted twice in the same way (2.4 MB unpacked for the chat
+server, 56 MB for the Bookstore).
 Version 1 is four times bigger (1.14 GB and 1.55 GB) and downloads five times
 more (395 MB against 76 MB compressed). It adds the full JDK on Ubuntu, `git`
 and the build: the Gradle distribution and dependency cache, the sources and
@@ -569,11 +598,13 @@ the build output.
 
 **Layer count.** Version 1 has more layers because each build step (`apt`,
 `clone`, `gradlew`, copy) is a `RUN` that leaves a layer. Versions 2 and 3
-add only their `COPY` instructions to the 5 layers of the base image: 2 for
-the chat server's version 2 (JAR and `lib/`), 1 for its version 3 (`/out`).
-The Bookstore's version 3 has the most layers of the small images (10), on
-purpose: the Spring Boot layers turn one 56 MB layer into four, so a code
-change only replaces the 32.8 kB one. Fewer layers is not a goal in itself.
+add only a few layers to the 5 of the base image: 2 `COPY` layers for the
+chat server's version 2 (JAR and `lib/`), and for its version 3 one `RUN`
+that creates the unprivileged user (32.8 kB, section 4.7) plus one `COPY`
+(`/out`). The Bookstore's version 3 has the most layers of the small images
+(11: the user, the `WORKDIR` and four Spring Boot layers), on purpose: the
+Spring Boot layers turn one 56 MB layer into four, so a code change only
+replaces the 32.8 kB one. Fewer layers is not a goal in itself.
 What matters is that the layers that change often are small and come last.
 
 **Security surface and build dependencies.**
@@ -581,8 +612,9 @@ What matters is that the layers that change often are small and come last.
 - *What is in the image.* Version 1 contains a compiler (`javac`), `git`,
   a shell with `apt`, 158 Ubuntu packages, the sources and Gradle with its
   caches. Anyone who gets a shell in the container can download, build and
-  run code. Versions 2 and 3 have none of these: a JRE, the application and
-  73 Alpine packages.
+  run code. Versions 2 and 3 have no compiler, `git`, Gradle or sources: a
+  JRE, the application and 73 Alpine packages. A BusyBox shell and `apk`
+  remain, part of the Alpine base.
 - *Vulnerabilities.* Most of the CVEs of version 1 are not in the
   application. In the chat server image they are in the libraries of the
   Gradle distribution left in `/root/.gradle` (Jackson, Bouncy Castle,
@@ -607,7 +639,7 @@ same on any machine with Docker.
 
 | Criterion | v1 clone | v2 host JAR | v3 multi-stage |
 | --- | --- | --- | --- |
-| Cold build | slowest | fastest (uses the host cache) | close to v1 |
+| Cold build | slow, network-bound | fastest (uses the host cache) | slow, network-bound |
 | Rebuild after a code change | does not see the change | host build + copy | only the changed layers |
 | Size (chat / Bookstore) | 1.14 / 1.55 GB | 291 / 393 MB | 291 / 392 MB |
 | Build tools in the image | JDK, git, Gradle, sources | none | none |
@@ -693,7 +725,9 @@ docker history cogsi-chat:v3 --format '{{.Size}}\t{{.CreatedBy}}'
 0B      CMD ["59001"]
 0B      ENTRYPOINT ["java" "-cp" "/opt/chat/chat-server.jar:/opt/chat/lib/*" ...
 0B      EXPOSE [59001/tcp]
+0B      USER 10001:10001
 2.4MB   COPY /out/ /opt/chat/ # buildkit
+32.8kB  RUN /bin/sh -c addgroup -S -g 10001 chat && adduser -S -D -H -u 10001 -G chat -s /sbin/nologin chat
 0B      ENTRYPOINT ["/__cacert_entrypoint.sh"]
 12.3kB  COPY --chmod=755 entrypoint.sh /__cacert_entrypoint.sh
 12.3kB  RUN /bin/sh -c set -eux; echo "Verifying install ..."
@@ -707,26 +741,84 @@ docker history cogsi-chat:v3 --format '{{.Size}}\t{{.CreatedBy}}'
 
 Reading the two histories from the bottom:
 
-- **Base image.** Ubuntu (117 MB) plus the JDK (309 MB) in version 1 against
-  Alpine (9 MB) plus the JRE (165 MB) in versions 2 and 3. The choice of base
-  image alone explains 250 MB of the difference.
+- **Base image.** Ubuntu (117 MB), its packages (73.1 MB) and the JDK
+  (309 MB) in version 1, 499 MB unpacked, against Alpine (9 MB), its
+  packages (37.9 MB) and the JRE (165 MB) in versions 2 and 3, 212 MB. The
+  choice of base image alone explains 287 MB (499 - 212) of unpacked
+  layers.
 - **Build steps.** Version 1 adds a layer per build step: `git` (78.5 MB,
   with its dependencies), the clone (4 MB), and the Gradle build (165 MB: the
   Gradle distribution, the dependency cache and the build output). The
   application itself, 2.4 MB, is the last `RUN`. Deleting the caches in a
   later `RUN` would not help: the files would be hidden, but the earlier
   layers still contain them.
-- **Version 3** has a single application layer, `COPY /out/ /opt/chat/`.
-  The `build` stage and its layers do not appear: only the final stage
-  makes up the image.
-- **Version 2** (not shown) is the same as version 3 with two `COPY`
-  layers (`chat-server-*.jar`, 24.6 kB, and `lib/`, 2.39 MB) instead of one.
-- **Metadata.** `CMD`, `ENTRYPOINT`, `EXPOSE`, `ENV` and `ARG` create
+- **Version 3** has a single application layer, `COPY /out/ /opt/chat/`,
+  and the 32.8 kB layer of the user it runs as (`/etc/passwd`,
+  `/etc/group`, `/etc/shadow` updated by `adduser`). The `build` stage and
+  its layers do not appear: only the final stage makes up the image.
+- **Version 2** has two `COPY` layers (`chat-server-*.jar`, 24.6 kB, and
+  `lib/`, 2.39 MB) and no user layer, since it runs as root (below).
+- **Metadata.** `CMD`, `ENTRYPOINT`, `EXPOSE`, `USER`, `ENV` and `ARG` create
   history entries of 0 B and no filesystem layer, which is why there are
   more history entries than layers. The `ARG` values are recorded in the
   `RUN` lines that use them (`RUN |2 REPO_URL=... REPO_REF=main`).
-- **The Bookstore** shows the same pattern, with its four Spring Boot layers
-  in version 3 (section 4.3).
+- **The Bookstore** shows the same pattern (below): version 1 has the same
+  `apt`, clone and Gradle layers, with a 402 MB Gradle layer (more
+  dependencies than the chat server); version 2 a single 55.8 MB `COPY` of
+  the executable JAR; version 3 the user and the four Spring Boot layers.
+
+The other four images, from the top down to the last layer they add to their
+base image (the base layers are the same as above):
+
+```bash
+for image in cogsi-chat:v2 cogsi-bookstore:v1 cogsi-bookstore:v2 cogsi-bookstore:v3; do
+  echo "== $image"; docker history "$image" --format '{{.Size}}\t{{.CreatedBy}}'
+done
+```
+
+```console
+== cogsi-chat:v2
+0B      CMD ["59001"]
+0B      ENTRYPOINT ["java" "-cp" "/opt/chat/chat-server.jar:/opt/chat/lib/*" "org.example.ChatServerApp"]
+0B      EXPOSE [59001/tcp]
+2.39MB  COPY app/build/libs/lib/ /opt/chat/lib/ # buildkit
+24.6kB  COPY app/build/libs/chat-server-*.jar /opt/chat/chat-server.jar # buildkit
+...     (JRE Alpine base, as in cogsi-chat:v3)
+== cogsi-bookstore:v1
+0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
+0B      EXPOSE [8080/tcp]
+402MB   RUN |2 REPO_URL=... REPO_REF=main /bin/sh -c ./gradlew --no-daemon --console=plain bootJar && mkdir -p /opt/bookstore && cp ...
+4.1kB   WORKDIR /src/CA1/part2
+4.04MB  RUN |2 REPO_URL=... REPO_REF=main /bin/sh -c git clone --depth 1 --branch "${REPO_REF}" "${REPO_URL}" /src
+78.5MB  RUN |2 REPO_URL=... REPO_REF=main /bin/sh -c apt-get update && apt-get install -y --no-install-recommends git ...
+0B      ARG REPO_REF=main
+0B      ARG REPO_URL=https://github.com/Af-Oliveira/COGSI-2026-2027.git
+...     (JDK Ubuntu base, as in cogsi-chat:v1)
+== cogsi-bookstore:v2
+0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
+0B      EXPOSE [8080/tcp]
+55.8MB  COPY build/libs/bookstore-*.jar /opt/bookstore/bookstore.jar # buildkit
+...     (JRE Alpine base)
+== cogsi-bookstore:v3
+0B      ENTRYPOINT ["java" "-jar" "/opt/bookstore/bookstore.jar"]
+0B      EXPOSE [8080/tcp]
+0B      USER 10001:10001
+32.8kB  COPY /extracted/application/ ./ # buildkit
+4.1kB   COPY /extracted/snapshot-dependencies/ ./ # buildkit
+4.1kB   COPY /extracted/spring-boot-loader/ ./ # buildkit
+55.7MB  COPY /extracted/dependencies/ ./ # buildkit
+12.3kB  WORKDIR /opt/bookstore
+32.8kB  RUN /bin/sh -c addgroup -S -g 10001 bookstore && adduser -S -D -H -u 10001 -G bookstore -s /sbin/nologin bookstore
+...     (JRE Alpine base)
+```
+
+In the Bookstore's version 1 the copy of the JAR is in the same `RUN` as the
+build, so there is no separate application layer: the 402 MB layer holds the
+Gradle distribution, the dependency cache, the build output and the copied
+JAR together. Two of the Spring Boot layers of version 3 are 4.1 kB, the
+size of an empty directory entry: the application has no snapshot
+dependencies, and the loader is not needed because the extracted JAR runs
+with `java -jar` and a `Class-Path` (section 4.3).
 
 ### 4.6. Resource usage
 
@@ -734,28 +826,38 @@ Reading the two histories from the bottom:
 > network, and disk I/O activity while the container runs
 
 `docker stats` reads the cgroup counters of each container and refreshes
-them every second. Without arguments it streams all the running containers;
-`--no-stream` prints one sample, which is what is recorded below. The
-Bookstore was started with limits, so that the `LIMIT` column and the CPU
-quota are visible:
+them every second: without `--no-stream` it keeps redrawing the table until
+it is stopped, which is the real-time view; with `--no-stream` it prints one
+sample. The Bookstore was started with limits, so that the `LIMIT` column
+and the CPU quota are visible. The container of section 4.3 is replaced,
+because a name can only be used once:
 
 ```bash
+docker rm -f bookstore-v3
 docker run -d --name bookstore-v3 --cpus 1.5 --memory 512m -p 18083:8080 cogsi-bookstore:v3
 F='{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
 docker stats --no-stream --format "table $F" bookstore-v3 chat-v3
 ```
 
 ```console
-NAME           CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
-bookstore-v3   15.98%    219.6MiB / 512MiB     42.90%    3.59kB / 1.13kB   135kB / 32.8kB   30
-chat-v3        0.15%     50.43MiB / 15.48GiB   0.32%     4.13kB / 616B     4.1kB / 119kB    20
+NAME           CPU %     MEM USAGE / LIMIT    MEM %     NET I/O           BLOCK I/O         PIDS
+bookstore-v3   0.18%     211.6MiB / 512MiB    41.33%    4.34kB / 1.65kB   16.4kB / 49.2kB   29
+chat-v3        0.14%     50.1MiB / 15.48GiB   0.32%     2.7kB / 126B      2.36MB / 73.7kB   19
 ```
 
-Load on the Bookstore: 6000 `GET /books` with 32 parallel clients, then 300
-`POST /books`, sampled every second in a second terminal:
+#### Bookstore under load
+
+Two terminals. In the first, the live view (stopped with `Ctrl+C`):
 
 ```bash
-for i in $(seq 1 6); do docker stats --no-stream --format "$F" bookstore-v3; sleep 1; done
+F='{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
+docker stats --format "table $F" bookstore-v3
+```
+
+In the second, 6000 `GET /books` with 32 parallel clients, then 300
+`POST /books`:
+
+```bash
 seq 1 6000 | xargs -P 32 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:18083/books | sort | uniq -c
 seq 1 300 | xargs -P 8 -I{} curl -s -o /dev/null -X POST localhost:18083/books \
   -H 'Content-Type: application/json' -d '{"title":"Load test","author":"COGSI","price":1.0}'
@@ -763,60 +865,100 @@ seq 1 300 | xargs -P 8 -I{} curl -s -o /dev/null -X POST localhost:18083/books \
 
 ```console
    6000 200
-bookstore-v3  151.14%  241.3MiB / 512MiB  47.14%  196kB / 207kB    135kB / 49.2kB  55
-bookstore-v3  150.56%  250MiB / 512MiB    48.83%  427kB / 463kB    135kB / 49.2kB  65
-bookstore-v3  152.35%  251.8MiB / 512MiB  49.17%  672kB / 730kB    135kB / 49.2kB  65
-bookstore-v3  151.67%  255.6MiB / 512MiB  49.92%  940kB / 1.02MB   135kB / 61.4kB  65
-bookstore-v3  150.28%  259.1MiB / 512MiB  50.61%  1.24MB / 1.35MB  135kB / 61.4kB  65
-bookstore-v3  151.46%  262.2MiB / 512MiB  51.21%  1.56MB / 1.7MB   135kB / 73.7kB  65
+```
+
+The first terminal, one redraw per second (consecutive identical redraws
+removed):
+
+```console
+NAME           CPU %     MEM USAGE / LIMIT   MEM %     NET I/O           BLOCK I/O         PIDS
+bookstore-v3   0.00%     211.6MiB / 512MiB   41.33%    4.34kB / 1.65kB   16.4kB / 61.4kB   29
+bookstore-v3   153.27%   227.4MiB / 512MiB   44.41%    76.8kB / 75.8kB   16.4kB / 61.4kB   56
+bookstore-v3   152.24%   235.1MiB / 512MiB   45.91%    185kB / 194kB   16.4kB / 61.4kB   63
+bookstore-v3   152.31%   233MiB / 512MiB     45.51%    286kB / 306kB   16.4kB / 61.4kB   63
+bookstore-v3   150.84%   246MiB / 512MiB     48.05%    396kB / 428kB   16.4kB / 61.4kB   66
+bookstore-v3   150.97%   247.6MiB / 512MiB   48.37%    509kB / 553kB   16.4kB / 73.7kB   66
+bookstore-v3   151.87%   249.1MiB / 512MiB   48.65%    631kB / 686kB   16.4kB / 73.7kB   66
+bookstore-v3   152.10%   250.9MiB / 512MiB   49.01%    758kB / 826kB   16.4kB / 73.7kB   66
 ```
 
 and after the load:
 
 ```console
-NAME           CPU %     MEM USAGE / LIMIT   MEM %     NET I/O           BLOCK I/O      PIDS
-bookstore-v3   0.17%     275.6MiB / 512MiB   53.84%    3.11MB / 3.31MB   135kB / 86kB   65
+NAME           CPU %     MEM USAGE / LIMIT   MEM %     NET I/O           BLOCK I/O         PIDS
+bookstore-v3   1.46%     263.7MiB / 512MiB   51.50%    3.11MB / 3.31MB   16.4kB / 98.3kB   67
 ```
 
-Load on the chat server: 20 clients connected at the same time, each sending
-50 messages that the server broadcasts to all the others:
+#### Chat server under load
+
+The same two terminals, with `docker stats --format "table $F" chat-v3` in
+the first. In the second, 20 clients connect at the same time and each sends
+50 messages, which the server broadcasts to every connected client:
+
+```bash
+for c in $(seq 1 20); do
+  ( sleep 0.5; echo "user$c"; for m in $(seq 1 50); do echo "message $m from user$c"; done; sleep 4; echo /quit ) \
+    | timeout 8 nc localhost 59003 >/dev/null &
+done
+wait
+```
 
 ```console
-NAME      CPU %     MEM USAGE / LIMIT     NET I/O        BLOCK I/O       PIDS
-chat-v3   0.15%     50.43MiB / 15.48GiB   4.2kB / 616B   4.1kB / 147kB   20     <- idle
-chat-v3   0.15%     62.62MiB / 15.48GiB   99.9kB / 790kB 4.1kB / 147kB   51     <- 20 clients
+NAME      CPU %     MEM USAGE / LIMIT    MEM %     NET I/O          BLOCK I/O        PIDS
+chat-v3   0.00%     50.1MiB / 15.48GiB   0.32%     3.05kB / 126B    2.36MB / 98.3kB  19     <- idle
+chat-v3   114.43%   75.3MiB / 15.48GiB   0.47%     799kB / 1.31MB   2.36MB / 98.3kB  50     <- the 1000 messages
+chat-v3   0.15%     75.3MiB / 15.48GiB   0.47%     799kB / 1.31MB   2.36MB / 98.3kB  50
+chat-v3   0.29%     63.21MiB / 15.48GiB  0.40%     799kB / 1.31MB   2.36MB / 98.3kB  50     <- 20 clients idle
+chat-v3   2.10%     63.19MiB / 15.48GiB  0.40%     809kB / 1.33MB   2.36MB / 115kB   50     <- they leave
 ```
 
 ```console
 $ docker top chat-v3 -o user,pid,nlwp,rss,args
 USER     PID       NLWP   RSS     COMMAND
-10001    2946805   49     83072   java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+10001    3085627   50     83612   java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
 ```
 
-What the samples show:
+#### What the samples show
 
-- **CPU.** Under load the Bookstore stays at 150%, exactly the quota set by
-  `--cpus 1.5` (1.5 CPUs out of 12): the kernel throttles the container, it
-  does not get more CPU because the host has idle cores. Idle, the JVM
-  uses almost nothing (0.17%). The chat server stays at 0.15% even with 20
-  clients, because broadcasting short lines is cheap.
-- **Memory.** The Bookstore grows from 220 to 276 MiB under load (heap,
+- **CPU.** Under load the Bookstore stays between 150% and 153%, the quota
+  set by `--cpus 1.5` (1.5 CPUs out of 12): the kernel throttles the
+  container, it does not get more CPU because the host has idle cores. The
+  chat server has no limit and uses 114% for the second in which the 1000
+  messages arrive (each is written to 20 sockets), then goes back to almost
+  nothing. A one-off sample can miss such a burst, which is why the live
+  view matters.
+- **Memory.** The Bookstore grows from 212 to 264 MiB under load (heap,
   Tomcat threads) and stays there afterwards: the JVM does not give memory
   back to the system right away. Without `--memory`, the limit shown is the
-  whole host (15.48 GiB, `chat-v3`), so the JVM sizes its maximum heap from
-  the host and not from the container. With `--memory 512m` it uses 25% of
-  512 MiB as its default maximum heap, which is why Part 2 sets
-  `-XX:MaxRAMPercentage`.
+  whole host (15.48 GiB, `chat-v3`), and the JVM sizes its default maximum
+  heap from it. With `--memory 512m` the JVM sees the container's limit:
+
+  ```console
+  $ docker exec bookstore-v3 java -XX:+PrintFlagsFinal -version | grep -E ' MaxHeapSize | MaxRAMPercentage '
+     size_t MaxHeapSize          = 134217728     {product} {ergonomic}
+     double MaxRAMPercentage     = 25.000000     {product} {default}
+  $ docker exec chat-v3 java -XX:+PrintFlagsFinal -version | grep ' MaxHeapSize '
+     size_t MaxHeapSize          = 4158652416    {product} {ergonomic}
+  ```
+
+  128 MiB is 25% of 512 MiB, and 3.9 GiB is 25% of the host. A quarter of
+  the container is a small heap for a Spring Boot application, which is why
+  Part 2 sets `-XX:MaxRAMPercentage=75`.
 - **Network.** `NET I/O` is received / sent on the container's interface.
-  The chat server sends 8 times more than it receives (790 kB against
-  100 kB): each message received is sent to every connected client.
+  The Bookstore sends slightly more than it receives (3.31 MB against
+  3.11 MB). The chat server sends 1.31 MB: each line received is written to
+  every connected client. Its received bytes include the clients' messages
+  and the TCP acknowledgements of everything it sends.
 - **Disk.** `BLOCK I/O` hardly moves: the Bookstore uses an in-memory H2
   database in Part 1 and only the logs are written. Part 2 moves the data
   to a volume.
 - **PIDs.** The column counts threads, not processes. It grows with the
-  load: Tomcat adds worker threads (30 to 65) and the chat server one thread
-  per client (20 to 51). `docker top` shows the same, 49 threads (`NLWP`)
-  in a single process.
+  load: Tomcat adds worker threads (29 to 67). The chat server goes from 19
+  to 50: one handler thread per client (20) plus JVM compiler and garbage
+  collector threads started under load. It stays at 50 after the clients
+  leave because `ChatServer` runs its handlers in a fixed pool of up to 500
+  threads (`Executors.newFixedThreadPool(500)`), which keeps idle threads.
+  `docker top` shows the same, 50 threads (`NLWP`) in a single process.
 
 ### 4.7. Running as a non-root user
 
@@ -827,19 +969,31 @@ What the samples show:
 > reduction, and container hardening
 
 Without a `USER` instruction the process runs as `root`, the default of the
-base image. Before the change, in `chat-v3`:
+base image. The Dockerfiles in the repository already contain the change;
+the version before it (commit `aff35b6`) can be built from Git to see the
+difference:
+
+```bash
+git show aff35b6:CA4/part1/chat/v3/Dockerfile | docker build -f - -t cogsi-chat:v3-root CA1/part1
+docker run -d --name chat-v3-root cogsi-chat:v3-root
+```
 
 ```console
-$ docker exec chat-v3 id
+$ docker exec chat-v3-root id
 uid=0(root) gid=0(root) groups=0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
-$ docker exec chat-v3 sh -c 'touch /opt/chat/chat-server.jar && echo "can modify the application"; head -c 40 /etc/shadow'
+$ docker exec chat-v3-root sh -c 'touch /opt/chat/chat-server.jar && echo "can modify the application"; head -c 40 /etc/shadow'
 can modify the application
 root:*::0:::::
 bin:!::0:::::
 daemon:!::0
-$ ps -o user,pid,args -C java       # on the host
-root     2891067 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+$ ps -o user,pid,args -C java | grep ChatServerApp       # on the host
+10001    3085627 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
+root     3146664 java -cp /opt/chat/chat-server.jar:/opt/chat/lib/* org.example.ChatServerApp 59001
 ```
+
+On the host, the same program runs as UID 10001 in `chat-v3` (current
+image) and as `root` in `chat-v3-root`. The root container is then removed
+(`docker rm -f chat-v3-root`).
 
 Both version 3 Dockerfiles now create a system user and switch to it in the
 runtime stage ([chat](part1/chat/v3/Dockerfile),
@@ -867,7 +1021,7 @@ USER 10001:10001
 - The only directory the Bookstore writes to is `/tmp` (Tomcat's work
   directory), which every user can write to.
 
-After the change:
+After the change, in the containers of sections 4.2 and 4.3:
 
 ```console
 $ docker exec chat-v3 id
@@ -904,7 +1058,9 @@ Why it matters:
   `ps` shows. The kernel is shared, so an escape through a kernel or runtime
   vulnerability, a mounted host directory or a mounted Docker socket would
   act as root on the host. As 10001, files created on a bind mount belong to
-  an unprivileged UID, and an escape lands as a user without privileges.
+  an unprivileged UID, and an attacker who breaks out starts without root
+  privileges. That reduces the impact; it is not a guarantee, because a
+  kernel or runtime exploit can also escalate privileges.
 - **Container hardening.** Non-root is one of several layers: Docker also
   drops most Linux capabilities and applies a seccomp profile by default.
   The image can go further at run time with `--read-only` (read-only root
@@ -915,3 +1071,174 @@ Why it matters:
 Versions 1 and 2 were left as root on purpose, as the baseline of the
 comparison: running as non-root does not depend on the build strategy and
 would be the same three lines in any of them.
+
+### 4.8. Tags and publishing
+
+> Tag your images appropriately and publish them to Docker Hub
+
+#### Tagging scheme
+
+| Tag | Example | Points to | Moves? |
+| --- | --- | --- | --- |
+| `<version>-<strategy>` | `cogsi-chat:1.0-v1` | one build strategy of one application version | no |
+| `<strategy>` | `cogsi-chat:v3` | the latest build of that strategy | yes |
+| `<version>` | `cogsi-bookstore:1.0.0` | the recommended image (version 3) of that application version | no |
+| `latest` | `cogsi-bookstore:latest` | the recommended image of the latest version | yes |
+
+- The application version comes from the project itself (`appVersion=1.0`
+  in `CA1/part1/gradle.properties`, `version = '1.0.0'` in
+  `CA1/part2/build.gradle`), so the tag says which code is inside.
+- The build strategy is part of the tag and not of the repository name: the
+  three images run the same application, and one repository per
+  application keeps them side by side (`docker pull rmotafreitas/cogsi-chat:1.0-v2`).
+- `latest` is only a default for `docker pull` without a tag. Anything that
+  must be reproducible (the Compose file of Part 2) uses a fixed tag, and the
+  digest (`sha256:...`) is what identifies the content: `latest`, `1.0.0` and
+  `1.0.0-v3` of the Bookstore have the same digest.
+
+#### Publishing
+
+[`part1/publish.sh`](part1/publish.sh) applies the scheme to the six images
+built in sections 4.2 and 4.3 and pushes them to any registry, given by
+`REGISTRY` and `NAMESPACE`. `DRY_RUN=1` prints the commands:
+
+```console
+$ DRY_RUN=1 REGISTRY=docker.io CA4/part1/publish.sh | head -6
++ docker tag cogsi-chat:v1 docker.io/rmotafreitas/cogsi-chat:1.0-v1
++ docker tag cogsi-chat:v1 docker.io/rmotafreitas/cogsi-chat:v1
++ docker tag cogsi-chat:v2 docker.io/rmotafreitas/cogsi-chat:1.0-v2
++ docker tag cogsi-chat:v2 docker.io/rmotafreitas/cogsi-chat:v2
++ docker tag cogsi-chat:v3 docker.io/rmotafreitas/cogsi-chat:1.0-v3
++ docker tag cogsi-chat:v3 docker.io/rmotafreitas/cogsi-chat:v3
+```
+
+> **Docker Hub is pending.** The machine used for this assignment is not
+> logged in to the Docker Hub account used by the group (`rmotafreitas`,
+> Ricardo's personal account), so the
+> images were not pushed there. Publishing was verified instead with
+> a local registry and a GitHub release (below). The Docker Hub push is the
+> same script once the account is logged in:
+>
+> ```bash
+> docker login -u rmotafreitas
+> REGISTRY=docker.io CA4/part1/publish.sh
+> ```
+
+**Local registry.** `registry:3` is the reference implementation of the OCI
+distribution API, the same protocol Docker Hub uses. It runs as a container,
+with its storage in a volume:
+
+```bash
+docker run -d --name registry --restart unless-stopped -p 5000:5000 \
+  -v registry-data:/var/lib/registry registry:3
+REGISTRY=localhost:5000 CA4/part1/publish.sh
+curl -s localhost:5000/v2/_catalog
+curl -s localhost:5000/v2/rmotafreitas/cogsi-chat/tags/list
+curl -s localhost:5000/v2/rmotafreitas/cogsi-bookstore/tags/list
+```
+
+```console
+{"repositories":["rmotafreitas/cogsi-bookstore","rmotafreitas/cogsi-chat"]}
+{"name":"rmotafreitas/cogsi-chat","tags":["1.0","1.0-v1","1.0-v2","1.0-v3","latest","v1","v2","v3"]}
+{"name":"rmotafreitas/cogsi-bookstore","tags":["1.0.0","1.0.0-v1","1.0.0-v2","1.0.0-v3","latest","v1","v2","v3"]}
+```
+
+Docker accepts a registry on `localhost` over plain HTTP; any other host
+would need TLS or an `insecure-registries` entry in the daemon
+configuration. The 16 tags take 871 MB in the registry's volume: the layers
+shared between images (the JRE base of versions 2 and 3, the JDK of
+version 1) are stored once.
+
+To check that the registry really serves the images, every local copy of the
+Bookstore's version 2 was deleted and pulled back:
+
+```bash
+docker rmi cogsi-bookstore:v2 localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2 \
+  localhost:5000/rmotafreitas/cogsi-bookstore:v2
+docker pull localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+docker run -d --name pulled-v2 -p 18090:8080 localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+curl -s localhost:18090/actuator/health
+```
+
+```console
+ae393e711df0: Pull complete
+Digest: sha256:29da09e40243c7cf9ae894f78422ba9ea86d403b3ba62e5078312cd22c34835c
+Status: Downloaded newer image for localhost:5000/rmotafreitas/cogsi-bookstore:1.0.0-v2
+{"groups":["liveness","readiness"],"status":"UP"}
+```
+
+```console
+$ docker buildx imagetools inspect localhost:5000/rmotafreitas/cogsi-bookstore:latest | head -3
+Name:      localhost:5000/rmotafreitas/cogsi-bookstore:latest
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:89a08b03ebd8c5ca5cdd576e20781ebb53197e18b603afe57f5693a398ce7378
+```
+
+The pushed image is an OCI image index (`vnd.oci.image.index.v1+json`): the
+containerd image store pushes the image together with its build
+attestations, so a registry stores a list that points to the image for
+`linux/amd64`.
+
+**GitHub release.** The version 3 images of both applications are also
+attached to the GitHub release of the tag `ca4-part1` (created in
+section 4.9) as `docker save` archives, with their SHA-256 checksums. They
+can be loaded without any registry:
+
+```bash
+gh release download ca4-part1 -R Af-Oliveira/COGSI-2026-2027 -p 'cogsi-*.tar.gz' -p SHA256SUMS
+sha256sum -c SHA256SUMS
+docker load -i cogsi-chat-1.0-v3.tar.gz
+```
+
+### 4.9. Tag `ca4-part1` and release
+
+> At the end of this assignment mark your commit with the tag ca4-part1
+
+On `main`, after the pull request that completes Part 1 was merged, the tag
+marks the end of Part 1, and a GitHub release on it carries the version 3
+images:
+
+```bash
+git switch main && git pull
+git tag -a ca4-part1 -m "CA4 Part 1: Docker images for the CA1 applications"
+git push origin ca4-part1
+
+mkdir -p /tmp/ca4-release && cd /tmp/ca4-release
+docker save cogsi-chat:v3 | gzip > cogsi-chat-1.0-v3.tar.gz
+docker save cogsi-bookstore:v3 | gzip > cogsi-bookstore-1.0.0-v3.tar.gz
+sha256sum cogsi-*.tar.gz > SHA256SUMS
+gh release create ca4-part1 -R Af-Oliveira/COGSI-2026-2027 --verify-tag \
+  --title "CA4 Part 1" \
+  --notes "CA4 Part 1: version 3 images of the chat server and the Bookstore (docker load -i <file>)" \
+  cogsi-*.tar.gz SHA256SUMS
+```
+
+---
+
+## 5. Part 2 - proxy, web and db with Docker Compose
+
+_Second week of the assignment (tag `ca4-part2`)._
+
+---
+
+## 6. Alternative solution - analysis and design
+
+_Second week of the assignment._
+
+---
+
+## 7. Alternative solution - implementation
+
+_Second week of the assignment._
+
+---
+
+## 8. Operative guidelines and team work
+
+_Completed at the end of the assignment._
+
+---
+
+## 9. References
+
+_Completed at the end of the assignment._
