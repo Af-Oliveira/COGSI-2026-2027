@@ -1998,7 +1998,7 @@ Docker daemon were considered:
 | Build from a Dockerfile | BuildKit | Buildah (`podman build`), Containerfile or Dockerfile | BuildKit (`nerdctl build`) | no: images are built from a configured container (`incus publish`) or with distrobuilder | no: definition file (`.def`); can start from an OCI image (`Bootstrap: docker`) |
 | Image format and registries | OCI / Docker, any registry | OCI / Docker, any registry | OCI / Docker, any registry | its own image servers; OCI registries for application containers since Incus 6.3 | SIF file; pulls OCI images and pushes SIF to OCI registries (ORAS) |
 | Multi-container definition | Compose | `podman compose` (runs podman-compose or docker-compose), `podman kube play` (Kubernetes YAML), Quadlet (systemd units) | `nerdctl compose` | profiles, cloud-init or Ansible | none (instances started by scripts) |
-| Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default |
+| Networks with name resolution | user-defined bridge, embedded DNS | netavark + aardvark-dns; pods share one network namespace | CNI plugins, `/etc/hosts` per network | managed bridge with DNS (`<name>.incus`) | host network by default; network namespaces with CNI (`--net --network`) as root or with administrator configuration |
 | Health checks | `HEALTHCHECK`, `healthcheck:` | `HEALTHCHECK`, `--health-*`, run by systemd timers | depends on the nerdctl version | none (systemd inside the container) | none |
 | Start after a dependency is healthy | `depends_on: condition: service_healthy` | Quadlet `Notify=healthy` + `Requires=`/`After=` (podman-compose 1.3.0 ignores the condition, section 7) | depends on the nerdctl version | systemd ordering inside, none between containers | none |
 | Volumes | named volumes, bind mounts | the same | the same | storage volumes, disk devices | bind mounts, overlay images |
@@ -2019,9 +2019,10 @@ The main differences for CA4:
   the virtual machines of CA2 and CA3, so the CA3 Ansible playbook could
   configure them almost unchanged. This is a different model from one process
   per container, and the Dockerfiles of Part 1 are not used.
-- **Apptainer** targets batch jobs on shared clusters: no isolated networks,
-  no health checks and no orchestration, which leaves most of Part 2 without
-  support.
+- **Apptainer** targets batch jobs on shared clusters: containers share the
+  host network unless isolated networking is enabled (as root, or as
+  configured by an administrator), and there are no health checks and no
+  orchestration, which leaves most of Part 2 to scripts.
 
 ### 6.3. Design of CA4 with each tool
 
@@ -2067,12 +2068,16 @@ The main differences for CA4:
 - Part 1: a `.def` file per application (`Bootstrap: docker`,
   `From: eclipse-temurin:21-jdk`, `%post` to clone and build, `%runscript`
   to start), or `apptainer build chat.sif docker-daemon://cogsi-chat:v3` to
-  convert an existing image. The three versions are only partly
-  reproducible: there are no multi-stage builds in the same sense (a
-  second `.def` can copy files from the first SIF with `%files from`).
-- Part 2: three instances on the host network, started in order by a script
-  that waits for each port; the H2 data directory as a bind mount. No
-  network isolation between tiers.
+  convert an existing image. The three versions map directly: version 3
+  is a multi-stage definition file, with a `Stage: build` section that
+  compiles and a `Stage: runtime` section that copies the result with
+  `%files from build`.
+- Part 2: three instances (`apptainer instance start`), started in order
+  by a script that waits for each health endpoint; the H2 data directory as a
+  bind mount. As an unprivileged user they share the host network, so the
+  tiers are separated only by the ports they listen on; isolated networks
+  (`--net --network`, CNI) need root or a configuration by the
+  administrator.
 
 ### 6.4. Choice
 
@@ -2322,6 +2327,7 @@ How each Compose requirement is met:
 | Environment variables | `.env` interpolated into `environment:` | `podman.env` -> one `EnvironmentFile=` per service, written by `up.sh` |
 | Database password | variable in `.env` | Podman secret (below) |
 | Restart | `restart: unless-stopped` | `Restart=on-failure` of systemd |
+| Memory and CPU limits | `deploy.resources.limits` | `PodmanArgs=--memory=${WEB_MEM_LIMIT} --cpus=${WEB_CPUS}` (Podman 5.4's Quadlet has no dedicated key), expanded by systemd from `limits.env` |
 
 `Notify=healthy` is what makes the order work. The container runs with
 `podman run --sdnotify=healthy` and the unit is `Type=notify`: Podman tells
@@ -2508,10 +2514,29 @@ container; the data written through the proxy survived in the volume.
 ```console
 $ podman stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}'
 NAME        CPU %       MEM USAGE / LIMIT  NET IO             BLOCK IO    PIDS
-db          4.18%       60.87MB / 16.63GB  37.31kB / 37.48kB  0B / 0B     39
-web         18.96%      305.2MB / 16.63GB  41.97kB / 37.25kB  0B / 0B     45
-proxy       0.36%       8.868MB / 16.63GB  1.912kB / 1.228kB  0B / 0B     13
+db          5.44%       42.47MB / 536.9MB  31.4kB / 51.52kB   0B / 0B     27
+web         30.13%      224.3MB / 805.3MB  55.49kB / 31.55kB  0B / 0B     29
+proxy       0.40%       8.737MB / 134.2MB  1.694kB / 1.521kB  0B / 0B     13
 ```
+
+Podman prints sizes in decimal units: 536.9 MB is the 512 MiB limit.
+
+The units keep the limits of Part 2 (section 5.5), applied by a rootless
+Podman through cgroups v2:
+
+```console
+$ for c in db web proxy; do echo "$c $(podman inspect $c --format 'memory={{.HostConfig.Memory}} cpuQuota={{.HostConfig.CpuQuota}} cpuPeriod={{.HostConfig.CpuPeriod}}')"; done
+db memory=536870912 cpuQuota=100000 cpuPeriod=100000
+web memory=805306368 cpuQuota=150000 cpuPeriod=100000
+proxy memory=134217728 cpuQuota=50000 cpuPeriod=100000
+$ podman exec web sh -c 'java -XX:MaxRAMPercentage=75 -XX:+PrintFlagsFinal -version | grep " MaxHeapSize "'
+   size_t MaxHeapSize          = 603979776     {product} {ergonomic}
+```
+
+512 MiB / 1 CPU, 768 MiB / 1.5 CPUs and 128 MiB / 0.5 CPU, and the same
+576 MiB heap as under Compose. (The first version of the units had no
+limits; they were added with `PodmanArgs=` after the review of this
+section.)
 
 `ps` on the host shows the two JVMs as UID 110000, the mapped 10001:
 
@@ -2565,6 +2590,7 @@ the comparison. (The path to the file must be absolute: with
 | Part 2: start order gated by health | met only when started through systemd | `podman start db web proxy` by hand ignores the order; the order lives in the units, not in the containers |
 | Part 2: configuration with variables | met, with a translation step | Quadlet has no interpolation like Compose: `up.sh` writes one environment file per service from `podman.env` |
 | Part 2: health checks | met while the systemd user session runs | the checks are systemd timers; containers started at boot need lingering (`loginctl enable-linger`, already enabled on this host) |
+| Memory and CPU limits | met, rootless | needs the `memory` and `cpu` cgroup controllers delegated to the user (`cgroup.controllers` of `user@1000.service`: `cpu memory pids` on this host); otherwise Podman ignores the limits |
 | Ports below 1024 | not used | rootless Podman cannot bind them unless `net.ipv4.ip_unprivileged_port_start` is lowered; the proxy listens on 80 inside the container and is published on 8090 |
 | Multi-host, Windows/macOS | not covered | Podman runs containers on Linux; on Windows and macOS it uses a Linux VM (`podman machine`), as Docker Desktop does |
 
