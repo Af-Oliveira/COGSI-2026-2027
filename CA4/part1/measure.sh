@@ -76,14 +76,16 @@ build() {
     esac
 }
 
-# Prints "yes" or "no" depending on whether a path or command exists in the image.
+# Prints "yes" or "no" depending on whether a path or command exists in the
+# image. Run as root: as the non-root user of the v3 images, /root (mode 0700)
+# could not be read and a test inside it would always say "no".
 has() {
     local image=$1 test=$2
-    if docker run --rm --entrypoint sh "$image" -c "$test" >/dev/null 2>&1; then echo yes; else echo no; fi
+    if docker run --rm --user 0 --entrypoint sh "$image" -c "$test" >/dev/null 2>&1; then echo yes; else echo no; fi
 }
 
 packages() {
-    docker run --rm --entrypoint sh "$1" -c \
+    docker run --rm --user 0 --entrypoint sh "$1" -c \
         'if command -v dpkg-query >/dev/null; then dpkg-query -W | wc -l; else apk info 2>/dev/null | wc -l; fi'
 }
 
